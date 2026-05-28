@@ -210,7 +210,8 @@ class KaoClient:
         except urllib.error.HTTPError as exc:
             detail = exc.reason
             try:
-                detail = json.loads(exc.read().decode("utf-8")).get("detail", detail)
+                payload = json.loads(exc.read().decode("utf-8"))
+                detail = payload.get("error", {}).get("message") or payload.get("detail", detail)
             except Exception:
                 pass
             raise KaoServiceError(f"Kao service error: {detail}") from exc
@@ -270,7 +271,8 @@ class KaoClient:
         except urllib.error.HTTPError as exc:
             detail = exc.reason
             try:
-                detail = json.loads(exc.read().decode("utf-8")).get("detail", detail)
+                payload = json.loads(exc.read().decode("utf-8"))
+                detail = payload.get("error", {}).get("message") or payload.get("detail", detail)
             except Exception:
                 pass
             raise KaoServiceError(f"Kao service error: {detail}") from exc
