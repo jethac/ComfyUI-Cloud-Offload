@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -289,6 +290,29 @@ class KaoClient:
     def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._json("POST", "/api/generate", payload=payload)
 
+    def create_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json("POST", "/api/jobs", payload=payload, timeout=10)
+
+    def job_status(self, job_id: str) -> Dict[str, Any]:
+        return self._json("GET", f"/api/jobs/{urllib.parse.quote(job_id)}", timeout=10)
+
+    def job_result(self, job_id: str) -> Dict[str, Any]:
+        return self._json("GET", f"/api/jobs/{urllib.parse.quote(job_id)}/result", timeout=30)
+
+    def generate_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        job = self.create_job(payload)
+        job_id = job["job_id"]
+        while True:
+            status = self.job_status(job_id)
+            state = status.get("status")
+            if state == "completed":
+                return self.job_result(job_id)
+            if state == "failed":
+                raise KaoServiceError(status.get("error") or "Kao generation job failed")
+            if state in {"cancelled", "cancel_requested"}:
+                raise KaoServiceError("Kao generation job was cancelled")
+            time.sleep(1)
+
     def project_state(self, world: str) -> Dict[str, Any]:
         return self._json("GET", f"/api/workspace/projects/{urllib.parse.quote(world)}")
 
@@ -426,7 +450,7 @@ class KaoImageTo3D:
         remove_background: bool = True,
         generate_texture: bool = False,
     ):
-        response = client.generate(
+        response = client.generate_job(
             {
                 "model": model,
                 "image": _image_to_b64(image),
@@ -463,7 +487,7 @@ class KaoMultiViewTo3D:
     CATEGORY = "Kao"
 
     def generate(self, front, left, back, steps: int = 30, seed: int = -1, octree_resolution: str = "380", remove_background: bool = True):
-        response = client.generate(
+        response = client.generate_job(
             {
                 "model": "hunyuan3d-2mv",
                 "images": {
@@ -505,7 +529,7 @@ class KaoImageToScene:
             output_types.append("depth")
         if output_normals:
             output_types.append("normals")
-        response = client.generate(
+        response = client.generate_job(
             {
                 "model": "world-mirror",
                 "image": _image_to_b64(image),

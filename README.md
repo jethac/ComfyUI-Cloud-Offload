@@ -27,6 +27,9 @@ port. Discovery validates Kao's `/api/health` endpoint before node execution.
 For a non-local Kao service, set `KAO_TOKEN` or let ComfyUI-Kao read the token
 path from the local Kao service file.
 
+Generation nodes submit work through Kao's local job API and block until the job
+finishes or returns a clear service error.
+
 ## Nodes
 
 | Node | Description |
