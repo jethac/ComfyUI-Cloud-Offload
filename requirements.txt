@@ -1,1 +1,3 @@
-kao
+# ComfyUI-Kao talks to a running Kao service over HTTP.
+# No direct `kao` Python package dependency is required.
+# Intentionally empty: no package install surface to pin.

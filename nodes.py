@@ -1,50 +1,385 @@
 """
-ComfyUI-Kao: Kao nodes for ComfyUI
+ComfyUI-Kao: Kao service nodes for ComfyUI.
 """
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import os
+import shutil
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import numpy as np
 from PIL import Image
-from typing import Optional
-
-# Try importing kao - guide user if not installed
-try:
-    from kao import KaoRuntime
-    from kao.models import list_models
-    KAO_AVAILABLE = True
-except ImportError:
-    KAO_AVAILABLE = False
-    print("[ComfyUI-Kao] Kao not installed. Run: pip install kao")
 
 
-# Shared runtime
-_runtime = None
+OLLAMA_PORT = 11434
+DEFAULT_KAO_PORT = 11435
+KAO_SERVICE_FILE_ENV = "KAO_SERVICE_FILE"
+KAO_URL_ENV = "KAO_URL"
+KAO_TOKEN_ENV = "KAO_TOKEN"
+KAO_API_HEALTH_TIMEOUT = 0.1
+KAO_CONNECT_TIMEOUT = 0.005
 
 
-def get_runtime():
-    global _runtime
-    if not KAO_AVAILABLE:
-        raise RuntimeError("Kao not installed. Run: pip install kao")
-    if _runtime is None:
-        _runtime = KaoRuntime()
-    return _runtime
+def _url_port(url: str) -> int | None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "http":
+        return 80
+    if parsed.scheme == "https":
+        return 443
+    return None
 
 
-def get_model_list():
-    if KAO_AVAILABLE:
-        return list_models()
-    return ["kao-not-installed"]
+def _normalize_kao_url(url: str, source: str) -> str:
+    normalized = url.rstrip("/")
+    if _url_port(normalized) == OLLAMA_PORT:
+        raise RuntimeError(f"{source} resolves to port {OLLAMA_PORT}, which is reserved for Ollama")
+    return normalized
+
+
+def _read_kao_token(path: str | None = None) -> str | None:
+    configured = os.environ.get(KAO_TOKEN_ENV)
+    if configured:
+        return configured.strip()
+    if not path:
+        return None
+    try:
+        token = Path(path).expanduser().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def _is_healthy_kao(url: str, token: str | None = None) -> bool:
+    request = urllib.request.Request(f"{_normalize_kao_url(url, 'Kao service')}/api/health")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=KAO_API_HEALTH_TIMEOUT) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return False
+    return payload.get("name") == "Kao" and payload.get("status") == "ok"
+
+
+def _can_connect_kao_port(port: int) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=KAO_CONNECT_TIMEOUT):
+            return True
+    except OSError:
+        return False
+
+
+def discover_kao_service(require_healthy: bool = False) -> Dict[str, Any]:
+    configured = os.environ.get(KAO_URL_ENV)
+    if configured:
+        url = _normalize_kao_url(configured, KAO_URL_ENV)
+        token = _read_kao_token()
+        if require_healthy and not _is_healthy_kao(url, token):
+            raise RuntimeError(f"Kao service is not healthy at {url}")
+        return {"url": url, "token": token}
+
+    service_file = Path(os.environ.get(KAO_SERVICE_FILE_ENV, Path.home() / ".kao" / "service.json"))
+    try:
+        service_info = json.loads(service_file.read_text(encoding="utf-8"))
+        service_port = service_info.get("port")
+        if isinstance(service_port, str) and service_port.isdigit():
+            service_port = int(service_port)
+        if isinstance(service_port, int) and service_port == OLLAMA_PORT:
+            raise RuntimeError(
+                f"{service_file} resolves to port {OLLAMA_PORT}, which is reserved for Ollama"
+            )
+        if isinstance(service_info.get("url"), str):
+            url = _normalize_kao_url(service_info["url"], str(service_file))
+            token = _read_kao_token(service_info.get("token_path"))
+            if not require_healthy or _is_healthy_kao(url, token):
+                return {"url": url, "token": token}
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError:
+        pass
+
+    if require_healthy:
+        for port in range(DEFAULT_KAO_PORT, 11551):
+            if port == OLLAMA_PORT:
+                continue
+            url = f"http://127.0.0.1:{port}"
+            if _can_connect_kao_port(port) and _is_healthy_kao(url):
+                return {"url": url, "token": None}
+        raise RuntimeError("No healthy Kao service found")
+
+    return {"url": f"http://127.0.0.1:{DEFAULT_KAO_PORT}", "token": None}
+
+
+def discover_kao_url() -> str:
+    return discover_kao_service()["url"]
+
+
+KAO_URL = discover_kao_url()
+
+
+class KaoServiceError(RuntimeError):
+    """Raised when the Kao service is unavailable or rejects a request."""
+
+
+class KaoMeshArtifact:
+    """File-backed mesh object compatible with the existing KAO_MESH node type."""
+
+    def __init__(self, path: Path, stats: Optional[Dict[str, Any]] = None):
+        self.path = Path(path)
+        self.stats = stats or {}
+        self.vertices = range(int(self.stats.get("vertices") or 0))
+        self.faces = range(int(self.stats.get("faces") or 0))
+        visual_kind = self.stats.get("visual_kind")
+        self.visual = type("Visual", (), {"kind": visual_kind})() if visual_kind else None
+
+    def export(self, path: str, *args, **kwargs) -> None:
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.path, destination)
+
+
+class KaoClient:
+    """Small HTTP client for the local Kao service."""
+
+    def __init__(self, base_url: Optional[str] = None, timeout: int = 600):
+        self._configured_base_url = base_url
+        self.token: Optional[str] = _read_kao_token() if base_url else None
+        self.base_url = _normalize_kao_url(base_url, "KaoClient") if base_url else discover_kao_url()
+        self.timeout = timeout
+
+    def _refresh_base_url(self) -> None:
+        if self._configured_base_url is None:
+            service = discover_kao_service(require_healthy=True)
+            self.base_url = service["url"]
+            self.token = service.get("token")
+
+    def _headers(self, headers: Dict[str, str]) -> Dict[str, str]:
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
+
+    def _url(self, path: str, query: Optional[Dict[str, Any]] = None) -> str:
+        url = f"{self.base_url}{path}"
+        if query:
+            url = f"{url}?{urllib.parse.urlencode(query)}"
+        return url
+
+    def _json(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Dict[str, Any]] = None,
+        query: Optional[Dict[str, Any]] = None,
+        timeout: Optional[int] = None,
+    ) -> Any:
+        try:
+            self._refresh_base_url()
+        except RuntimeError as exc:
+            raise KaoServiceError(str(exc)) from exc
+        data = None
+        headers = self._headers({"Accept": "application/json"})
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            self._url(path, query=query),
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+                body = response.read().decode("utf-8")
+                return json.loads(body) if body else {}
+        except urllib.error.HTTPError as exc:
+            detail = exc.reason
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("detail", detail)
+            except Exception:
+                pass
+            raise KaoServiceError(f"Kao service error: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise KaoServiceError(f"Kao service unavailable at {self.base_url}: {exc.reason}") from exc
+
+    def _multipart(
+        self,
+        path: str,
+        fields: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Path]] = None,
+    ) -> Any:
+        try:
+            self._refresh_base_url()
+        except RuntimeError as exc:
+            raise KaoServiceError(str(exc)) from exc
+        boundary = f"----comfyui-kao-{uuid.uuid4().hex}"
+        chunks: list[bytes] = []
+        for name, value in (fields or {}).items():
+            if value is None:
+                continue
+            chunks.extend(
+                [
+                    f"--{boundary}\r\n".encode(),
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                    str(value).encode(),
+                    b"\r\n",
+                ]
+            )
+        for name, path in (files or {}).items():
+            file_path = Path(path)
+            chunks.extend(
+                [
+                    f"--{boundary}\r\n".encode(),
+                    (
+                        f'Content-Disposition: form-data; name="{name}"; '
+                        f'filename="{file_path.name}"\r\n'
+                    ).encode(),
+                    b"Content-Type: application/octet-stream\r\n\r\n",
+                    file_path.read_bytes(),
+                    b"\r\n",
+                ]
+            )
+        chunks.append(f"--{boundary}--\r\n".encode())
+        request = urllib.request.Request(
+            self._url(path),
+            data=b"".join(chunks),
+            headers={
+                **self._headers({"Accept": "application/json"}),
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.reason
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("detail", detail)
+            except Exception:
+                pass
+            raise KaoServiceError(f"Kao service error: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise KaoServiceError(f"Kao service unavailable at {self.base_url}: {exc.reason}") from exc
+
+    def model_names(self) -> list[str]:
+        models = self._json("GET", "/api/models", timeout=10)
+        return [model["name"] for model in models]
+
+    def load(self, model_name: str) -> None:
+        self._json("POST", "/api/load", query={"model_name": model_name})
+
+    def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json("POST", "/api/generate", payload=payload)
+
+    def project_state(self, world: str) -> Dict[str, Any]:
+        return self._json("GET", f"/api/workspace/projects/{urllib.parse.quote(world)}")
+
+    def create_object_intent(self, world: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json(
+            "POST",
+            f"/api/workspace/projects/{urllib.parse.quote(world)}/objects",
+            payload=payload,
+        )
+
+    def generate_object(self, world: str, object_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json(
+            "POST",
+            (
+                f"/api/workspace/projects/{urllib.parse.quote(world)}/objects/"
+                f"{urllib.parse.quote(object_name)}/generate"
+            ),
+            payload=payload,
+        )
+
+    def import_mesh(self, world: str, object_name: str, mesh_path: Path, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        return self._multipart(
+            (
+                f"/api/workspace/projects/{urllib.parse.quote(world)}/objects/"
+                f"{urllib.parse.quote(object_name)}/import"
+            ),
+            fields={"metadata": json.dumps(metadata), "producer": "ComfyUI-Kao"},
+            files={"file": mesh_path},
+        )
+
+    def write_material_intent(self, world: str, object_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json(
+            "POST",
+            (
+                f"/api/workspace/projects/{urllib.parse.quote(world)}/objects/"
+                f"{urllib.parse.quote(object_name)}/materials"
+            ),
+            payload=payload,
+        )
+
+
+client = KaoClient()
+
+
+def get_model_list() -> list[str]:
+    try:
+        return client.model_names()
+    except Exception:
+        return ["kao-service-unavailable"]
+
+
+def _image_to_b64(image) -> str:
+    img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
+    pil_image = Image.fromarray(img_np)
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _temp_artifact(suffix: str, data_b64: str) -> Path:
+    output_dir = Path(tempfile.gettempdir()) / "comfyui-kao"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{uuid.uuid4().hex}{suffix}"
+    path.write_bytes(base64.b64decode(data_b64))
+    return path
+
+
+def _mesh_from_response(response: Dict[str, Any]) -> KaoMeshArtifact:
+    if not response.get("mesh"):
+        raise RuntimeError("Kao response did not include a mesh")
+    return KaoMeshArtifact(_temp_artifact(".glb", response["mesh"]), response.get("stats") or {})
+
+
+def _decode_image_tensor(value: Optional[str]):
+    if not value:
+        return None
+    import torch
+
+    image = Image.open(io.BytesIO(base64.b64decode(value))).convert("RGB")
+    data = np.array(image).astype(np.float32) / 255.0
+    return torch.from_numpy(data).unsqueeze(0)
+
+
+def _object_payload(object: str, **kwargs) -> Dict[str, Any]:
+    return {"object_name": object, "object": object, **kwargs}
 
 
 class KaoLoadModel:
-    """Load a Kao model into VRAM."""
+    """Load a Kao model into the service process."""
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model_name": (get_model_list(),),
-            },
-        }
+        return {"required": {"model_name": (get_model_list(),)}}
 
     RETURN_TYPES = ("KAO_MODEL",)
     RETURN_NAMES = ("model",)
@@ -52,21 +387,17 @@ class KaoLoadModel:
     CATEGORY = "Kao"
 
     def load(self, model_name: str):
-        runtime = get_runtime()
-        runtime.load(model_name)
+        client.load(model_name)
         return (model_name,)
 
 
 class KaoImageTo3D:
-    """Generate 3D mesh from a single image using Kao."""
+    """Generate 3D mesh from a single image using the Kao service."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                "image": ("IMAGE",),
-                "model": ("KAO_MODEL",),
-            },
+            "required": {"image": ("IMAGE",), "model": ("KAO_MODEL",)},
             "optional": {
                 "steps": ("INT", {"default": 30, "min": 1, "max": 100}),
                 "guidance_scale": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 20.0, "step": 0.1}),
@@ -93,26 +424,20 @@ class KaoImageTo3D:
         remove_background: bool = True,
         generate_texture: bool = False,
     ):
-        runtime = get_runtime()
-
-        if runtime.loaded_model != model:
-            runtime.load(model)
-
-        # ComfyUI image: [B, H, W, C] tensor in 0-1
-        img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
-        pil_image = Image.fromarray(img_np)
-
-        result = runtime.generate(
-            image=pil_image,
-            steps=steps,
-            guidance_scale=guidance_scale,
-            seed=seed,
-            octree_resolution=int(octree_resolution),
-            remove_background=remove_background,
-            generate_texture=generate_texture,
+        response = client.generate(
+            {
+                "model": model,
+                "image": _image_to_b64(image),
+                "steps": steps,
+                "guidance_scale": guidance_scale,
+                "seed": seed,
+                "octree_resolution": int(octree_resolution),
+                "remove_background": remove_background,
+                "generate_texture": generate_texture,
+                "output_format": "glb",
+            }
         )
-
-        return (result.mesh, result.seed)
+        return (_mesh_from_response(response), response.get("seed", seed))
 
 
 class KaoMultiViewTo3D:
@@ -121,11 +446,7 @@ class KaoMultiViewTo3D:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                "front": ("IMAGE",),
-                "left": ("IMAGE",),
-                "back": ("IMAGE",),
-            },
+            "required": {"front": ("IMAGE",), "left": ("IMAGE",), "back": ("IMAGE",)},
             "optional": {
                 "steps": ("INT", {"default": 30, "min": 1, "max": 100}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
@@ -139,46 +460,32 @@ class KaoMultiViewTo3D:
     FUNCTION = "generate"
     CATEGORY = "Kao"
 
-    def generate(
-        self,
-        front, left, back,
-        steps: int = 30,
-        seed: int = -1,
-        octree_resolution: str = "380",
-        remove_background: bool = True,
-    ):
-        runtime = get_runtime()
-
-        if runtime.loaded_model != "hunyuan3d-2mv":
-            runtime.load("hunyuan3d-2mv")
-
-        def to_pil(img):
-            return Image.fromarray((img[0].cpu().numpy() * 255).astype(np.uint8))
-
-        result = runtime.generate(
-            images={
-                "front": to_pil(front),
-                "left": to_pil(left),
-                "back": to_pil(back),
-            },
-            steps=steps,
-            seed=seed,
-            octree_resolution=int(octree_resolution),
-            remove_background=remove_background,
+    def generate(self, front, left, back, steps: int = 30, seed: int = -1, octree_resolution: str = "380", remove_background: bool = True):
+        response = client.generate(
+            {
+                "model": "hunyuan3d-2mv",
+                "images": {
+                    "front": _image_to_b64(front),
+                    "left": _image_to_b64(left),
+                    "back": _image_to_b64(back),
+                },
+                "steps": steps,
+                "seed": seed,
+                "octree_resolution": int(octree_resolution),
+                "remove_background": remove_background,
+                "output_format": "glb",
+            }
         )
-
-        return (result.mesh, result.seed)
+        return (_mesh_from_response(response), response.get("seed", seed))
 
 
 class KaoImageToScene:
-    """Reconstruct 3D scene from image (WorldMirror)."""
+    """Reconstruct 3D scene from image through Kao."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                "image": ("IMAGE",),
-            },
+            "required": {"image": ("IMAGE",)},
             "optional": {
                 "output_depth": ("BOOLEAN", {"default": True}),
                 "output_normals": ("BOOLEAN", {"default": False}),
@@ -190,44 +497,21 @@ class KaoImageToScene:
     FUNCTION = "generate"
     CATEGORY = "Kao"
 
-    def generate(
-        self,
-        image,
-        output_depth: bool = True,
-        output_normals: bool = False,
-    ):
-        import torch
-
-        runtime = get_runtime()
-
-        if runtime.loaded_model != "world-mirror":
-            runtime.load("world-mirror")
-
-        img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
-        pil_image = Image.fromarray(img_np)
-
+    def generate(self, image, output_depth: bool = True, output_normals: bool = False):
         output_types = ["pointcloud"]
         if output_depth:
             output_types.append("depth")
         if output_normals:
             output_types.append("normals")
-
-        result = runtime.generate(image=pil_image, output_types=output_types)
-
-        # Convert to ComfyUI formats
-        pointcloud = result.pointcloud
-
-        depth = None
-        if result.depth:
-            d = np.array(result.depth.convert("RGB")).astype(np.float32) / 255.0
-            depth = torch.from_numpy(d).unsqueeze(0)
-
-        normals = None
-        if result.normals:
-            n = np.array(result.normals.convert("RGB")).astype(np.float32) / 255.0
-            normals = torch.from_numpy(n).unsqueeze(0)
-
-        return (pointcloud, depth, normals)
+        response = client.generate(
+            {
+                "model": "world-mirror",
+                "image": _image_to_b64(image),
+                "output_types": output_types,
+            }
+        )
+        pointcloud = base64.b64decode(response["pointcloud"]) if response.get("pointcloud") else None
+        return (pointcloud, _decode_image_tensor(response.get("depth")), _decode_image_tensor(response.get("normals")))
 
 
 class KaoSaveMesh:
@@ -240,7 +524,7 @@ class KaoSaveMesh:
                 "mesh": ("KAO_MESH",),
                 "filename": ("STRING", {"default": "kao_output"}),
                 "format": (["glb", "obj", "ply", "stl"],),
-            },
+            }
         }
 
     RETURN_TYPES = ("STRING",)
@@ -251,22 +535,19 @@ class KaoSaveMesh:
 
     def save(self, mesh, filename: str, format: str = "glb"):
         import folder_paths
-        output_dir = folder_paths.get_output_directory()
-        filepath = f"{output_dir}/{filename}.{format}"
-        mesh.export(filepath)
-        return (filepath,)
+
+        output_dir = Path(folder_paths.get_output_directory())
+        filepath = output_dir / f"{filename}.{format}"
+        mesh.export(str(filepath))
+        return (str(filepath),)
 
 
 class KaoMeshPreview:
-    """Preview mesh stats (no 3D viewer yet)."""
+    """Preview mesh stats."""
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "mesh": ("KAO_MESH",),
-            },
-        }
+        return {"required": {"mesh": ("KAO_MESH",)}}
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("info",)
@@ -275,12 +556,199 @@ class KaoMeshPreview:
 
     def preview(self, mesh):
         info = f"Vertices: {len(mesh.vertices)}\nFaces: {len(mesh.faces)}"
-        if hasattr(mesh, 'visual') and mesh.visual is not None:
+        if getattr(mesh, "visual", None) is not None:
             info += f"\nTextured: {mesh.visual.kind == 'texture'}"
+        if isinstance(mesh, KaoMeshArtifact):
+            info += f"\nArtifact: {mesh.path}"
         return (info,)
 
 
-# Node mappings for ComfyUI
+class KaoWorkspaceProjectState:
+    """Return shared Kao workspace project state as JSON."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "root": ("STRING", {"default": r"B:\workshop\Kao"}),
+                "world": ("STRING", {"default": "default-world"}),
+                "stage_input": ("STRING", {"default": "input"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("state_json", "root_path", "world_path", "stage_input_path", "output_path")
+    FUNCTION = "state"
+    CATEGORY = "Kao/Workspace"
+
+    def state(self, root: str, world: str, stage_input: str = "input"):
+        state = client.project_state(world)
+        world_dir = state.get("world_dir", "")
+        output_dir = str(Path(world_dir) / "output") if world_dir else ""
+        return (json.dumps(state, indent=2, sort_keys=True), state.get("root", root), world_dir, "", output_dir)
+
+
+class KaoWorkspaceObjectIntent:
+    """Create or update an object intent JSON in the shared workspace."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "root": ("STRING", {"default": r"B:\workshop\Kao"}),
+                "world": ("STRING", {"default": "default-world"}),
+                "object": ("STRING", {"default": "object"}),
+                "name": ("STRING", {"default": "Object"}),
+            },
+            "optional": {
+                "description": ("STRING", {"default": "", "multiline": True}),
+                "source_image_path": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("object_json", "object_path", "object_dir")
+    FUNCTION = "write"
+    CATEGORY = "Kao/Workspace"
+    OUTPUT_NODE = True
+
+    def write(self, root: str, world: str, object: str, name: str, description: str = "", source_image_path: str = ""):
+        response = client.create_object_intent(
+            world,
+            _object_payload(object, name=name, prompt=description, source_image=source_image_path),
+        )
+        object_dir = response.get("object_dir", "")
+        return (json.dumps(response, indent=2, sort_keys=True), str(Path(object_dir) / "object.json") if object_dir else "", object_dir)
+
+
+class KaoGenerateObjectToWorkspace:
+    """Generate a GLB into a shared Kao workspace object directory."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "root": ("STRING", {"default": r"B:\workshop\Kao"}),
+                "world": ("STRING", {"default": "default-world"}),
+                "object": ("STRING", {"default": "object"}),
+                "model": (get_model_list(),),
+            },
+            "optional": {
+                "steps": ("INT", {"default": 30, "min": 1, "max": 100}),
+                "guidance_scale": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 20.0, "step": 0.1}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
+                "octree_resolution": (["256", "384", "512"], {"default": "256"}),
+                "remove_background": ("BOOLEAN", {"default": True}),
+                "generate_texture": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("mesh_path", "metadata_path")
+    FUNCTION = "generate"
+    CATEGORY = "Kao/Workspace"
+    OUTPUT_NODE = True
+
+    def generate(self, image, root: str, world: str, object: str, model: str, steps: int = 30, guidance_scale: float = 5.0, seed: int = -1, octree_resolution: str = "256", remove_background: bool = True, generate_texture: bool = False):
+        source_path = _temp_artifact(".png", _image_to_b64(image))
+        staged = client._multipart(
+            f"/api/workspace/projects/{urllib.parse.quote(world)}/source-images",
+            fields={"name": object},
+            files={"image": source_path},
+        )
+        source_image = (staged.get("image") or {}).get("path")
+        response = client.generate_object(
+            world,
+            object,
+            _object_payload(
+                object,
+                model=model,
+                source_image=source_image,
+                steps=steps,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                octree_resolution=int(octree_resolution),
+                remove_background=remove_background,
+                generate_texture=generate_texture,
+            ),
+        )
+        return (response.get("artifact", ""), response.get("metadata", ""))
+
+
+class KaoWorkspaceSaveMesh:
+    """Save a KAO_MESH as an indexed workspace artifact through Kao."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mesh": ("KAO_MESH",),
+                "root": ("STRING", {"default": r"B:\workshop\Kao"}),
+                "world": ("STRING", {"default": "default-world"}),
+                "object": ("STRING", {"default": "object"}),
+            },
+            "optional": {
+                "artifact_prefix": ("STRING", {"default": "mesh"}),
+                "format": (["glb", "obj", "ply", "stl"], {"default": "glb"}),
+                "metadata_json": ("STRING", {"default": "{}", "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("mesh_path", "metadata_path")
+    FUNCTION = "save"
+    CATEGORY = "Kao/Workspace"
+    OUTPUT_NODE = True
+
+    def save(self, mesh, root: str, world: str, object: str, artifact_prefix: str = "mesh", format: str = "glb", metadata_json: str = "{}"):
+        metadata = json.loads(metadata_json) if metadata_json.strip() else {}
+        source_path = Path(getattr(mesh, "path", ""))
+        if not source_path.exists():
+            output_dir = Path(tempfile.gettempdir()) / "comfyui-kao"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            source_path = output_dir / f"{uuid.uuid4().hex}.{format}"
+            mesh.export(str(source_path))
+        response = client.import_mesh(world, object, source_path, metadata)
+        return (response.get("artifact", ""), response.get("metadata", ""))
+
+
+class KaoWorkspaceMaterialIntent:
+    """Create/update a provider-neutral material intent for a workspace object."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "root": ("STRING", {"default": r"B:\workshop\Kao"}),
+                "world": ("STRING", {"default": "default-world"}),
+                "object": ("STRING", {"default": "object"}),
+                "material": ("STRING", {"default": "material"}),
+            },
+            "optional": {
+                "prompt": ("STRING", {"default": "", "multiline": True}),
+                "material_type": ("STRING", {"default": "pbr"}),
+                "metadata_json": ("STRING", {"default": "{}", "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("material_json", "material_path")
+    FUNCTION = "write"
+    CATEGORY = "Kao/Workspace"
+    OUTPUT_NODE = True
+
+    def write(self, root: str, world: str, object: str, material: str, prompt: str = "", material_type: str = "pbr", metadata_json: str = "{}"):
+        metadata = json.loads(metadata_json) if metadata_json.strip() else {}
+        response = client.write_material_intent(
+            world,
+            object,
+            _object_payload(object, material_name=material, prompt=prompt, material_type=material_type, metadata=metadata),
+        )
+        material_path = response.get("material_json", "")
+        return (json.dumps(response, indent=2, sort_keys=True), material_path)
+
+
 NODE_CLASS_MAPPINGS = {
     "KaoLoadModel": KaoLoadModel,
     "KaoImageTo3D": KaoImageTo3D,
@@ -288,13 +756,23 @@ NODE_CLASS_MAPPINGS = {
     "KaoImageToScene": KaoImageToScene,
     "KaoSaveMesh": KaoSaveMesh,
     "KaoMeshPreview": KaoMeshPreview,
+    "KaoWorkspaceProjectState": KaoWorkspaceProjectState,
+    "KaoWorkspaceObjectIntent": KaoWorkspaceObjectIntent,
+    "KaoGenerateObjectToWorkspace": KaoGenerateObjectToWorkspace,
+    "KaoWorkspaceSaveMesh": KaoWorkspaceSaveMesh,
+    "KaoWorkspaceMaterialIntent": KaoWorkspaceMaterialIntent,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "KaoLoadModel": "Kao Load Model",
-    "KaoImageTo3D": "Kao Image → 3D",
-    "KaoMultiViewTo3D": "Kao Multi-View → 3D",
-    "KaoImageToScene": "Kao Image → Scene",
+    "KaoImageTo3D": "Kao Image -> 3D",
+    "KaoMultiViewTo3D": "Kao Multi-View -> 3D",
+    "KaoImageToScene": "Kao Image -> Scene",
     "KaoSaveMesh": "Kao Save Mesh",
     "KaoMeshPreview": "Kao Mesh Preview",
+    "KaoWorkspaceProjectState": "Workspace Project State",
+    "KaoWorkspaceObjectIntent": "Workspace Object Intent",
+    "KaoGenerateObjectToWorkspace": "Kao Generate Object To Workspace",
+    "KaoWorkspaceSaveMesh": "Workspace Save Mesh",
+    "KaoWorkspaceMaterialIntent": "Workspace Material Intent",
 }
