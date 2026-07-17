@@ -730,6 +730,10 @@ class KaoImageTo3D:
         )
         mesh = _mesh_from_response(response)
         texture = _texture_from_glb(mesh.path) if generate_texture else None
+        if generate_texture and texture is None:
+            raise KaoServiceError(
+                "Kao returned a GLB without an embedded base-color texture"
+            )
         return (
             mesh,
             response.get("seed", seed),

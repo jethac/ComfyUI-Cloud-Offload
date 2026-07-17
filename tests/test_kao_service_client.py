@@ -219,6 +219,28 @@ def test_image_node_outputs_preview_file_and_optional_texture(monkeypatch):
     assert texture == "texture-image"
 
 
+def test_image_node_rejects_missing_requested_texture(monkeypatch):
+    nodes = load_nodes_module()
+    monkeypatch.setattr(nodes, "_image_to_b64", lambda image: "image-data")
+    monkeypatch.setattr(
+        nodes.client,
+        "generate_job",
+        lambda payload: {
+            "mesh": base64.b64encode(b"mesh").decode("ascii"),
+            "seed": 7,
+            "stats": {},
+        },
+    )
+    monkeypatch.setattr(nodes, "_texture_from_glb", lambda path: None)
+
+    try:
+        nodes.KaoImageTo3D().generate(object(), generate_texture=True)
+    except nodes.KaoServiceError as exc:
+        assert "without an embedded base-color texture" in str(exc)
+    else:
+        raise AssertionError("Expected KaoServiceError")
+
+
 def test_texture_output_reads_embedded_glb_base_color(tmp_path):
     nodes = load_nodes_module()
     image_buffer = io.BytesIO()
