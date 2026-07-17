@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import shutil
+import struct
 import tempfile
 import time
 import urllib.error
@@ -507,6 +508,73 @@ def _mesh_from_response(response: Dict[str, Any]) -> KaoMeshArtifact:
     )
 
 
+def _file_3d_glb(path: Path):
+    try:
+        from comfy_api.latest import Types
+    except ImportError:
+        return str(path)
+    return Types.File3D(str(path), "glb")
+
+
+def _texture_from_glb(path: Path):
+    data = path.read_bytes()
+    if len(data) < 20 or data[:4] != b"glTF":
+        return None
+
+    document = None
+    binary = None
+    offset = 12
+    while offset + 8 <= len(data):
+        length, chunk_type = struct.unpack_from("<II", data, offset)
+        offset += 8
+        chunk = data[offset : offset + length]
+        offset += length
+        if chunk_type == 0x4E4F534A:
+            document = json.loads(chunk.rstrip(b"\x00 ").decode("utf-8"))
+        elif chunk_type == 0x004E4942:
+            binary = chunk
+
+    if not document or not document.get("images"):
+        return None
+
+    image_index = 0
+    materials = document.get("materials") or []
+    textures = document.get("textures") or []
+    if materials:
+        base_color = (
+            materials[0].get("pbrMetallicRoughness", {}).get("baseColorTexture") or {}
+        )
+        texture_index = base_color.get("index")
+        if texture_index is not None and texture_index < len(textures):
+            image_index = textures[texture_index].get("source", image_index)
+
+    images = document["images"]
+    if image_index >= len(images):
+        return None
+    image = images[image_index]
+    payload = None
+    if "bufferView" in image and binary is not None:
+        views = document.get("bufferViews") or []
+        if image["bufferView"] < len(views):
+            view = views[image["bufferView"]]
+            start = int(view.get("byteOffset", 0))
+            payload = binary[start : start + int(view["byteLength"])]
+    elif image.get("uri", "").startswith("data:"):
+        payload = base64.b64decode(image["uri"].split(",", 1)[1])
+
+    if not payload:
+        return None
+    try:
+        texture = Image.open(io.BytesIO(payload)).convert("RGB")
+    except OSError:
+        return None
+
+    import torch
+
+    pixels = np.array(texture).astype(np.float32) / 255.0
+    return torch.from_numpy(pixels).unsqueeze(0)
+
+
 def _decode_image_tensor(value: Optional[str]):
     if not value:
         return None
@@ -622,8 +690,8 @@ class KaoImageTo3D:
             },
         }
 
-    RETURN_TYPES = ("KAO_MESH", "INT")
-    RETURN_NAMES = ("mesh", "seed")
+    RETURN_TYPES = ("KAO_MESH", "INT", "FILE_3D_GLB", "IMAGE")
+    RETURN_NAMES = ("mesh", "seed", "model_3d", "texture")
     FUNCTION = "generate"
     CATEGORY = "Kao"
 
@@ -660,7 +728,14 @@ class KaoImageTo3D:
                 **_execution_payload(execution, provider),
             }
         )
-        return (_mesh_from_response(response), response.get("seed", seed))
+        mesh = _mesh_from_response(response)
+        texture = _texture_from_glb(mesh.path) if generate_texture else None
+        return (
+            mesh,
+            response.get("seed", seed),
+            _file_3d_glb(mesh.path),
+            texture,
+        )
 
 
 class KaoMultiViewTo3D:

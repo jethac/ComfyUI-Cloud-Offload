@@ -48,7 +48,7 @@ that will predictably fail after submission.
 | **Kao Load Model** | Load a Kao model (hunyuan3d-2.1-turbo, etc.) |
 | **Kao Select Model** | Select a model for cloud work without loading it locally |
 | **Kao Cloud Status** | Show routing, workers, and Vast.ai/RunPod balances as JSON |
-| **Kao Image → 3D** | Generate a mesh from one image with an inline model selector |
+| **Kao Image → 3D** | Generate a mesh with standard GLB preview and optional texture outputs |
 | **Kao Multi-View → 3D** | Generate mesh from front/left/back views |
 | **Kao Image → Scene** | Reconstruct scene (depth, pointcloud) |
 | **Kao Save Mesh** | Export mesh to GLB/OBJ/PLY/STL |

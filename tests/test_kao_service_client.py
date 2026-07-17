@@ -1,7 +1,11 @@
 import base64
 import importlib.util
+import io
 import json
+import struct
 from pathlib import Path
+
+from PIL import Image
 
 
 def load_nodes_module():
@@ -173,7 +177,7 @@ def test_image_node_forwards_cloud_provider(monkeypatch):
         },
     )
 
-    _, seed = nodes.KaoImageTo3D().generate(
+    _, seed, _, _ = nodes.KaoImageTo3D().generate(
         object(),
         "hunyuan3d-2.1-turbo",
         execution="cloud",
@@ -183,6 +187,71 @@ def test_image_node_forwards_cloud_provider(monkeypatch):
     assert seed == 7
     assert submitted[0]["execution"] == "cloud"
     assert submitted[0]["provider"] == "runpod"
+
+
+def test_image_node_outputs_preview_file_and_optional_texture(monkeypatch):
+    nodes = load_nodes_module()
+    monkeypatch.setattr(nodes, "_image_to_b64", lambda image: "image-data")
+    monkeypatch.setattr(
+        nodes.client,
+        "generate_job",
+        lambda payload: {
+            "mesh": base64.b64encode(b"mesh").decode("ascii"),
+            "seed": 7,
+            "stats": {},
+        },
+    )
+    monkeypatch.setattr(nodes, "_file_3d_glb", lambda path: ("glb", path))
+    monkeypatch.setattr(nodes, "_texture_from_glb", lambda path: "texture-image")
+
+    mesh, seed, model_3d, texture = nodes.KaoImageTo3D().generate(
+        object(), generate_texture=True
+    )
+
+    assert nodes.KaoImageTo3D.RETURN_TYPES == (
+        "KAO_MESH",
+        "INT",
+        "FILE_3D_GLB",
+        "IMAGE",
+    )
+    assert seed == 7
+    assert model_3d == ("glb", mesh.path)
+    assert texture == "texture-image"
+
+
+def test_texture_output_reads_embedded_glb_base_color(tmp_path):
+    nodes = load_nodes_module()
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (1, 1), (255, 0, 0)).save(image_buffer, format="PNG")
+    image_data = image_buffer.getvalue()
+    image_padding = b"\x00" * (-len(image_data) % 4)
+    document = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": len(image_data)}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(image_data)}],
+        "images": [{"bufferView": 0, "mimeType": "image/png"}],
+        "textures": [{"source": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+    }
+    json_data = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    json_padding = b" " * (-len(json_data) % 4)
+    json_chunk = json_data + json_padding
+    binary_chunk = image_data + image_padding
+    length = 12 + 8 + len(json_chunk) + 8 + len(binary_chunk)
+    glb = (
+        struct.pack("<4sII", b"glTF", 2, length)
+        + struct.pack("<II", len(json_chunk), 0x4E4F534A)
+        + json_chunk
+        + struct.pack("<II", len(binary_chunk), 0x004E4942)
+        + binary_chunk
+    )
+    path = tmp_path / "textured.glb"
+    path.write_bytes(glb)
+
+    texture = nodes._texture_from_glb(path)
+
+    assert tuple(texture.shape) == (1, 1, 1, 3)
+    assert texture[0, 0, 0].tolist() == [1.0, 0.0, 0.0]
 
 
 def test_image_node_has_default_model_dropdown_and_optional_override(monkeypatch):
