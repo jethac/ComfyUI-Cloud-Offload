@@ -32,6 +32,49 @@ def test_generate_job_polls_until_result(monkeypatch):
     assert client.generate_job({"model": "hunyuan3d-2.1-turbo"}) == {"seed": 42}
 
 
+def test_generate_job_tolerates_transient_status_timeout(monkeypatch):
+    nodes = load_nodes_module()
+    client = nodes.KaoClient(base_url="http://127.0.0.1:11501", timeout=60)
+    statuses = iter(
+        [
+            nodes.KaoServiceError(
+                "Kao service unavailable at http://127.0.0.1:11501: timed out"
+            ),
+            {"status": "completed", "progress": 100},
+        ]
+    )
+
+    def job_status(job_id):
+        status = next(statuses)
+        if isinstance(status, Exception):
+            raise status
+        return status
+
+    monkeypatch.setattr(client, "create_job", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(client, "job_status", job_status)
+    monkeypatch.setattr(client, "job_result", lambda job_id: {"seed": 42})
+    monkeypatch.setattr(nodes.time, "sleep", lambda seconds: None)
+
+    assert client.generate_job({"model": "hunyuan3d-2.1-turbo"}) == {"seed": 42}
+
+
+def test_client_refresh_does_not_health_gate_each_request(monkeypatch):
+    nodes = load_nodes_module()
+    health_requirements = []
+    client = nodes.KaoClient(base_url="http://127.0.0.1:11501")
+    client._configured_base_url = None
+    monkeypatch.setattr(
+        nodes,
+        "discover_kao_service",
+        lambda require_healthy=False: health_requirements.append(require_healthy)
+        or {"url": "http://127.0.0.1:11501", "token": None},
+    )
+
+    client._refresh_base_url()
+
+    assert health_requirements == [False]
+
+
 def test_generate_job_raises_on_failed_job(monkeypatch):
     nodes = load_nodes_module()
     client = nodes.KaoClient(base_url="http://127.0.0.1:11501")

@@ -8,6 +8,7 @@ import base64
 import io
 import json
 import os
+import socket
 import shutil
 import tempfile
 import time
@@ -185,7 +186,11 @@ class KaoClient:
 
     def _refresh_base_url(self) -> None:
         if self._configured_base_url is None:
-            service = discover_kao_service(require_healthy=True)
+            # Do not health-gate every request. Native model initialization can
+            # briefly hold the interpreter lock even though the Kao process and
+            # accepted job are still healthy. The request itself remains the
+            # authoritative availability check.
+            service = discover_kao_service(require_healthy=False)
             self.base_url = service["url"]
             self.token = service.get("token")
 
@@ -239,9 +244,10 @@ class KaoClient:
             except Exception:
                 pass
             raise KaoServiceError(f"Kao service error: {detail}") from exc
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            reason = getattr(exc, "reason", exc)
             raise KaoServiceError(
-                f"Kao service unavailable at {self.base_url}: {exc.reason}"
+                f"Kao service unavailable at {self.base_url}: {reason}"
             ) from exc
 
     def _multipart(
@@ -367,6 +373,8 @@ class KaoClient:
     def generate_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         job = self.create_job(payload)
         job_id = job["job_id"]
+        deadline = time.monotonic() + self.timeout
+        last_poll_error: Optional[KaoServiceError] = None
         while True:
             try:
                 _throw_if_processing_interrupted()
@@ -375,7 +383,19 @@ class KaoClient:
                     self.cancel_job(job_id)
                 finally:
                     raise
-            status = self.job_status(job_id)
+            try:
+                status = self.job_status(job_id)
+                last_poll_error = None
+            except KaoServiceError as exc:
+                if not str(exc).startswith("Kao service unavailable"):
+                    raise
+                last_poll_error = exc
+                if time.monotonic() >= deadline:
+                    raise KaoServiceError(
+                        f"Timed out waiting for Kao job {job_id}: {last_poll_error}"
+                    ) from exc
+                time.sleep(1)
+                continue
             state = status.get("status")
             if state == "completed":
                 return self.job_result(job_id)
