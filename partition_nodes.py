@@ -33,7 +33,7 @@ def _restore_file_artifact(value: Any, type_name: str) -> Any:
         return value
     artifact_type = value.get(ARTIFACT_MARKER)
     normalized_type = str(type_name or "").upper()
-    if artifact_type == "cloud_mesh" and normalized_type != "KAO_MESH":
+    if artifact_type == "cloud_mesh" and normalized_type != "CLOUD_MESH":
         raise CloudOffloadError("Cloud partition returned a mesh for an incompatible socket")
     if artifact_type == "file_3d" and not normalized_type.startswith("FILE_3D"):
         raise CloudOffloadError("Cloud partition returned a 3D file for an incompatible socket")
