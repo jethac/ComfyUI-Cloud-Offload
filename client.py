@@ -270,6 +270,19 @@ class CloudOffloadClient:
     def providers(self) -> Dict[str, Any]:
         return self._json("GET", "/api/providers", timeout=15)
 
+    def provider_action(
+        self, provider: str, action: str, payload: Dict[str, Any] | None = None
+    ) -> Dict[str, Any]:
+        """Administer one connector: credentials, settings, or a test probe."""
+        if action not in {"credentials", "settings", "test"}:
+            raise CloudOffloadError(f"Unsupported provider action: {action}")
+        return self._json(
+            "POST",
+            f"/api/providers/{urllib.parse.quote(provider)}/{action}",
+            payload=payload or {},
+            timeout=30,
+        )
+
     def provider_names(self) -> list[str]:
         """Selectable provider names, newest registry state first.
 

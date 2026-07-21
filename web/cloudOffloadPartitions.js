@@ -1,6 +1,14 @@
 import { app } from "/scripts/app.js"
 import { api } from "/scripts/api.js"
 import { compilePartitions } from "./partitionCompiler.js"
+import {
+  SETTING_GPU_TYPE,
+  SETTING_KEEP_WARM,
+  SETTING_MIN_VRAM,
+  SETTING_PROVIDER,
+  SETTING_TIMEOUT,
+  settingValue,
+} from "./cloudOffloadSettings.js"
 
 const COMMAND_MARK = "CloudOffload.MarkSelection"
 const COMMAND_UNMARK = "CloudOffload.UnmarkSelection"
@@ -29,16 +37,17 @@ function selectedCloudGroups() {
 }
 
 function partitionSettings() {
+  // New boxes inherit the user's ComfyUI settings; each box can still override.
   return {
     version: 1,
     enabled: true,
     partition_id: uuid(),
-    provider: "auto",
+    provider: settingValue(SETTING_PROVIDER, "auto"),
     profile: PROFILE,
-    gpu_type: "any",
-    min_gpu_ram_gb: 16,
-    timeout_seconds: 3600,
-    keep_warm: true,
+    gpu_type: settingValue(SETTING_GPU_TYPE, "any"),
+    min_gpu_ram_gb: Number(settingValue(SETTING_MIN_VRAM, 16)),
+    timeout_seconds: Math.max(60, Number(settingValue(SETTING_TIMEOUT, 60)) * 60),
+    keep_warm: settingValue(SETTING_KEEP_WARM, true) !== false,
   }
 }
 

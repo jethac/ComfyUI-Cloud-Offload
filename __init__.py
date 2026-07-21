@@ -62,6 +62,33 @@ def _register_routes() -> None:
             )
         return web.json_response(payload)
 
+    @PromptServer.instance.routes.post(
+        "/cloud_offload/providers/{provider}/{action}"
+    )
+    async def cloud_offload_provider_action(request):
+        """Proxy provider administration to the coordinator.
+
+        Credentials pass straight through to the coordinator, which stores them
+        outside ComfyUI. They are never written to comfy.settings.json.
+        """
+        import asyncio
+
+        provider = request.match_info["provider"]
+        action = request.match_info["action"]
+        if action not in {"credentials", "settings", "test"}:
+            return web.json_response({"error": "Unsupported action"}, status=404)
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except Exception:
+            body = {}
+        try:
+            payload = await asyncio.to_thread(
+                client.provider_action, provider, action, body
+            )
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        return web.json_response(payload)
+
 
 _register_routes()
 
