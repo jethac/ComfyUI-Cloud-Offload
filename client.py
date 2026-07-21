@@ -31,7 +31,11 @@ TOKEN_ENV = "CLOUD_OFFLOAD_TOKEN"
 SERVICE_FILE_ENV = "CLOUD_OFFLOAD_SERVICE_FILE"
 HEALTH_TIMEOUT = 0.1
 PARTITION_MEDIA_TYPE = "application/vnd.comfy.partition+zip"
-CLOUD_PROVIDERS = ["auto", "runpod", "vast.ai"]
+# Fallback only. The selectable list is discovered from the coordinator's
+# /api/providers route so that plugin-registered connectors appear without a
+# node-pack release; this is used when the coordinator is unreachable.
+FALLBACK_PROVIDERS = ["auto", "runpod", "vast.ai"]
+PROVIDER_CACHE_SECONDS = 30
 
 
 class CloudOffloadError(RuntimeError):
@@ -189,6 +193,7 @@ class CloudOffloadClient:
             else discover_url()
         )
         self.timeout = timeout
+        self._provider_cache: tuple[float, list[str]] | None = None
 
     def _refresh_base_url(self) -> None:
         if self._configured_base_url is None:
@@ -261,6 +266,32 @@ class CloudOffloadClient:
 
     def status(self) -> Dict[str, Any]:
         return self._json("GET", "/api/status", timeout=15)
+
+    def providers(self) -> Dict[str, Any]:
+        return self._json("GET", "/api/providers", timeout=15)
+
+    def provider_names(self) -> list[str]:
+        """Selectable provider names, newest registry state first.
+
+        Node definitions are built at import time, so a failure here must not
+        break node registration: fall back to the built-in names.
+        """
+        now = time.monotonic()
+        cached = self._provider_cache
+        if cached and now - cached[0] < PROVIDER_CACHE_SECONDS:
+            return list(cached[1])
+        try:
+            payload = self.providers()
+            names = [
+                str(entry["provider"])
+                for entry in payload.get("providers") or []
+                if entry.get("provider")
+            ]
+        except Exception:
+            names = []
+        resolved = ["auto", *dict.fromkeys(names)] if names else list(FALLBACK_PROVIDERS)
+        self._provider_cache = (now, resolved)
+        return list(resolved)
 
     # -- Job submission --------------------------------------------------
 

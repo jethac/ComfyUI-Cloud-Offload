@@ -11,9 +11,9 @@ import numpy as np
 from PIL import Image
 
 try:
-    from .client import CLOUD_PROVIDERS, CloudOffloadError, client
+    from .client import CloudOffloadError, client
 except ImportError:
-    from client import CLOUD_PROVIDERS, CloudOffloadError, client
+    from client import CloudOffloadError, client
 
 
 def _image_to_b64(image) -> str:
@@ -61,7 +61,7 @@ class CloudWorkflow:
                     "STRING",
                     {"multiline": True, "default": "{}"},
                 ),
-                "provider": (CLOUD_PROVIDERS, {"default": "auto"}),
+                "provider": (client.provider_names(), {"default": "auto"}),
                 "input_filename": (
                     "STRING",
                     {"default": "cloud_input.png"},

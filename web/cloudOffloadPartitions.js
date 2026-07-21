@@ -42,6 +42,39 @@ function partitionSettings() {
   }
 }
 
+// Providers are discovered from the coordinator so plugin-registered connectors
+// appear without shipping a new node pack. The dialog stays usable if the
+// coordinator is unreachable: "Auto" is always present.
+async function fetchProviders() {
+  const response = await api.fetchApi("/cloud_offload/providers")
+  if (!response.ok) throw new Error(`providers ${response.status}`)
+  return await response.json()
+}
+
+function populateProviders(select, hint, selected) {
+  fetchProviders().then((payload) => {
+    const providers = payload?.providers || []
+    if (!providers.length) return
+    const previous = selected || select.value || "auto"
+    select.innerHTML = '<option value="auto">Auto</option>'
+    for (const entry of providers) {
+      const option = document.createElement("option")
+      option.value = entry.provider
+      const balance = entry.balance?.available ? ` · $${Number(entry.balance.credit ?? 0).toFixed(2)}` : ""
+      option.textContent = `${entry.display_name || entry.provider}${entry.configured ? balance : " (needs credentials)"}`
+      option.disabled = !entry.configured
+      select.appendChild(option)
+    }
+    select.value = [...select.options].some((option) => option.value === previous) ? previous : "auto"
+    if (hint) {
+      const policy = payload.routing_policy === "cheapest" ? "cheapest offer" : "preferred order"
+      hint.textContent = `Auto uses the coordinator's ${policy}; default is ${payload.default_provider || "runpod"}`
+    }
+  }).catch(() => {
+    if (hint) hint.textContent = "Coordinator unreachable — only Auto is available"
+  })
+}
+
 function configureGroup(group = selectedCloudGroups()[0]) {
   if (!group) throw new Error("Select a Cloud Offload box to configure it")
   const settings = group.flags[FLAG]
@@ -52,7 +85,8 @@ function configureGroup(group = selectedCloudGroups()[0]) {
   form.innerHTML = `
     <h2 style="margin:0 0 16px;font-size:18px">Cloud Offload box</h2>
     <label style="display:grid;gap:6px;margin:10px 0">Provider
-      <select name="provider"><option value="auto">Auto</option><option value="runpod">RunPod</option><option value="vast.ai">Vast.ai</option></select>
+      <select name="provider"><option value="auto">Auto</option></select>
+      <span name="provider_hint" style="opacity:.65"></span>
     </label>
     <label style="display:grid;gap:6px;margin:10px 0">GPU type <span style="opacity:.65">“any” chooses the cheapest compatible GPU</span>
       <input name="gpu_type" type="text" placeholder="any or RTX 4090" />
@@ -69,6 +103,7 @@ function configureGroup(group = selectedCloudGroups()[0]) {
     <div style="opacity:.65;line-height:1.4">The box stays expanded. Its original nodes report live execution, progress, previews, and errors while running remotely.</div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px"><button type="button" name="cancel">Cancel</button><button type="submit">Save</button></div>`
   const controls = form.elements
+  populateProviders(controls.provider, form.querySelector('[name="provider_hint"]'), settings.provider)
   controls.provider.value = settings.provider || "auto"
   controls.gpu_type.value = settings.gpu_type || "any"
   controls.min_gpu_ram_gb.value = Number(settings.min_gpu_ram_gb || 16)

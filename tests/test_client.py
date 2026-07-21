@@ -332,3 +332,40 @@ def test_partition_path_requires_comfy_partition_root(monkeypatch):
     monkeypatch.delenv("COMFY_PARTITION_ROOT", raising=False)
     with pytest.raises(CloudOffloadError, match="COMFY_PARTITION_ROOT"):
         partition_nodes._partition_path("whatever.part", must_exist=False)
+
+
+# === Dynamic provider discovery ===
+
+def test_provider_names_come_from_coordinator(monkeypatch):
+    calls = []
+
+    def fake_json(self, method, path, **kwargs):
+        calls.append(path)
+        return {
+            "default_provider": "runpod",
+            "providers": [
+                {"provider": "runpod", "configured": True},
+                {"provider": "vast.ai", "configured": False},
+                {"provider": "lambda", "configured": True},
+            ],
+        }
+
+    monkeypatch.setattr(client_module.CloudOffloadClient, "_json", fake_json)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    assert instance.provider_names() == ["auto", "runpod", "vast.ai", "lambda"]
+    assert calls == ["/api/providers"]
+    # Cached: a second call must not re-query the coordinator.
+    assert instance.provider_names() == ["auto", "runpod", "vast.ai", "lambda"]
+    assert calls == ["/api/providers"]
+
+
+def test_provider_names_fall_back_when_coordinator_unreachable(monkeypatch):
+    def boom(self, method, path, **kwargs):
+        raise client_module.CloudOffloadError("coordinator down")
+
+    monkeypatch.setattr(client_module.CloudOffloadClient, "_json", boom)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    # Node definitions are built at import time; discovery failure must not break them.
+    assert instance.provider_names() == client_module.FALLBACK_PROVIDERS

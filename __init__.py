@@ -33,6 +33,38 @@ else:
         }
     )
 
+def _register_routes() -> None:
+    """Expose a same-origin provider list to the Cloud Offload box dialog.
+
+    The browser cannot call the coordinator directly (different origin, and the
+    bearer token stays server-side), so ComfyUI proxies the discovery route.
+    """
+    try:
+        from server import PromptServer
+        from aiohttp import web
+    except ImportError:  # pragma: no cover - outside ComfyUI
+        return
+
+    if __package__:
+        from .client import client
+    else:
+        from client import client
+
+    @PromptServer.instance.routes.get("/cloud_offload/providers")
+    async def cloud_offload_providers(request):
+        import asyncio
+
+        try:
+            payload = await asyncio.to_thread(client.providers)
+        except Exception as exc:
+            return web.json_response(
+                {"providers": [], "error": str(exc)}, status=502
+            )
+        return web.json_response(payload)
+
+
+_register_routes()
+
 WEB_DIRECTORY = "./web"
 
 __all__ = [
