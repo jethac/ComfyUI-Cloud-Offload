@@ -16,7 +16,7 @@ proxy node:
   "enabled": true,
   "partition_id": "uuid",
   "provider": "auto",
-  "profile": "comfyui",
+  "profile": "comfyui-omni",
   "gpu_type": "any",
   "min_gpu_ram_gb": 16,
   "keep_warm": true
