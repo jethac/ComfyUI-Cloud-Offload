@@ -1,107 +1,95 @@
 # ComfyUI-Cloud-Offload
 
 Run selected ComfyUI nodes on rented cloud GPUs as a visible, editable
-**Cloud Offload** box. Formerly ComfyUI-Kao: the pack still includes legacy
-Kao 3D generation and workspace nodes while they are decomposed into
-ordinary ComfyUI nodes.
+**Cloud Offload** box. Draw a box around any part of your graph and it executes
+on a remote runner while the original nodes stay expanded and report live
+progress, previews, and errors in place.
+
+This pack is a thin client. All provisioning, queueing, provider credentials,
+and remote execution live in the separately built **Cloud Offload coordinator**
+service (repo `cloud-offload`, Python package `cloud_offload`). RunPod is the
+default provider; Vast.ai is the alternative.
+
+## Requirements
+
+- A running Cloud Offload coordinator service. The pack never imports it as a
+  library and never handles provider credentials — it only speaks HTTP to the
+  coordinator's client-facing routes.
 
 ## Installation
 
-1. Install and start Kao separately:
+1. Start the Cloud Offload coordinator separately (see the `cloud-offload`
+   repo), for example:
    ```bash
-   pip install kao
-   kao serve --host 127.0.0.1
+   python -m cloud_offload serve --host 127.0.0.1
    ```
 
-2. Clone/symlink to custom_nodes:
+2. Clone or symlink this pack into `custom_nodes`:
    ```bash
    cd ComfyUI/custom_nodes
    git clone <remote-url> ComfyUI-Cloud-Offload
-   # or symlink for dev:
+   # or, for dev, junction/symlink your working copy:
    # mklink /J ComfyUI-Cloud-Offload B:\lab\ComfyUI-Cloud-Offload
    ```
 
 3. Restart ComfyUI.
 
-ComfyUI-Kao talks to the Kao service over HTTP. It does not import Kao as a
-Python library. It discovers Kao from `KAO_URL` or `~/.kao/service.json`; Kao
-auto-selects an available service port and never uses Ollama's reserved 11434
-port. Discovery validates Kao's `/api/health` endpoint before node execution.
-For a non-local Kao service, set `KAO_TOKEN` or let ComfyUI-Kao read the token
-path from the local Kao service file.
+## Coordinator discovery
 
-Generation nodes submit work through Kao's unified job API and block until the
-job finishes or returns a clear service error. Existing workflows remain local
-by default. Set a generation node's `execution` input to `auto` or `cloud` to
-let Kao route it, and optionally choose `vast.ai` or `runpod`. Provider
-credentials remain in Kao and are never handled by ComfyUI-Kao. Cancelling a
-ComfyUI workflow forwards cancellation to its active Kao job.
+The pack discovers the coordinator in this order:
 
-Each generation node owns its model/runtime choice. Generation nodes have no
-provider, execution, model selector, or inline `model_name` controls.
-Cloud placement and provider selection belong exclusively to a visible **Cloud
-Offload** box around the nodes to run remotely.
+1. `CLOUD_OFFLOAD_URL` environment variable;
+2. `~/.cloud-offload/service.json` (a JSON file with a `url` and optional
+   `token_path`);
+3. the localhost default `http://127.0.0.1:11435`.
+
+Port `11434` (Ollama's reserved port) is never used. For a non-local or
+authenticated coordinator, set `CLOUD_OFFLOAD_TOKEN`, or let the pack read the
+token path recorded in the service file. The request itself is the
+authoritative availability check; discovery does not health-gate every call.
 
 ## Nodes
 
-| Node | Description |
-|------|-------------|
-| **Kao Cloud Status** | Show routing, workers, and Vast.ai/RunPod balances as JSON |
-| **Kao Image → 3D** | Generate a mesh with standard GLB preview and optional texture outputs |
-| **Kao Multi-View → 3D** | Generate mesh from front/left/back views |
-| **Kao Image → Scene** | Reconstruct scene (depth, pointcloud) |
-| **Kao Save Mesh** | Export mesh to GLB/OBJ/PLY/STL |
-| **Kao Mesh Preview** | Show mesh stats |
-| **Workspace Project State** | Create/check a shared workspace root/world/stage input and return JSON plus key paths |
-| **Workspace Object Intent** | Create/update `worlds/<world>/output/<object>/object.json` |
-| **Kao Generate Object To Workspace** | Generate a GLB into an object workspace and write artifact metadata |
-| **Workspace Save Mesh** | Save an incoming `KAO_MESH` to an indexed workspace artifact path with sidecar metadata |
-| **Workspace Material Intent** | Write a provider-neutral material prompt/intent for Material Maker or texture pipelines |
+| Node | Category | Description |
+|------|----------|-------------|
+| **Cloud Status** | `Cloud Offload` | Show queue counts, active workers, and RunPod/Vast.ai balances as JSON |
+| **Cloud Workflow** | `Cloud Offload` | Submit a whole API-format ComfyUI workflow to a cloud runner and return its first image + result JSON |
 
-Workspace nodes are under `Kao/Workspace`. They use Kao's workspace HTTP API.
-Their compatibility `root` input now defaults to `B:\lab\Kao`; the running Kao
-service remains the authority for the actual workspace root:
+The four partition **bridge** nodes are compiler-generated and hidden
+(`is_dev_only`); users never place them by hand. They live under
+`Cloud Offload/Internal`:
 
-```text
-<root>/
-  worlds/
-    <world>/
-      source/
-      output/<object>/
-        object.json
-        0-object.glb
-        0-object.metadata.json
-        .0-object__model-request.json
-        materials/
-          bark.json
-```
+| Node | Role |
+|------|------|
+| `CloudPartitionGateway` | Local proxy that submits the boxed subgraph and pauses until it completes |
+| `CloudPartitionExtract` | Restores one ordinary Comfy value from the partition result |
+| `CloudPartitionInput` | Runner-side bridge that restores an uploaded boundary value |
+| `CloudPartitionOutput` | Runner-side bridge that writes a typed boundary bundle |
 
-## Example Workflow
-
-```text
-[Load Image] → [Kao Image → 3D] → [Kao Save Mesh]
-```
-
-`Kao Image → 3D` uses `hunyuan3d-2.1-turbo`. To run it remotely, draw a
-**Cloud Offload** box around the generation node; the box's
-provider and runner settings are authoritative.
-
-### Cloud Offload
+## Cloud Offload box
 
 Select one or more nodes and choose **Cloud Offload selection** from ComfyUI's
-selection toolbox. The visible box owns provider, GPU, timeout, and warm-runner
-policy. Nodes remain expanded and receive incremental remote progress.
+selection toolbox. A visible box appears around them and owns the provider, GPU
+type, minimum VRAM, timeout, and warm-runner policy. The nodes stay expanded
+and receive incremental remote progress: the currently executing node is
+highlighted, completed/cached nodes are marked, the box title shows percent,
+and live previews appear.
 
-The runner must contain every custom node and model used by the submitted
-workflow. Cloud Offload uses the `comfyui-omni` runtime, which includes pinned
-copies of ComfyUI-Kao, ComfyUI-See-through, ComfyUI-Grounding, and the Kao 3D
-generation runtime. Kao nodes remain ordinary nodes in the submitted subgraph,
-so mixed boxes execute as one graph and report normal node-level progress.
+At queue time the box is compiled into a hidden gateway plus typed input/output
+bridges (see [PARTITION_PROTOCOL.md](PARTITION_PROTOCOL.md)). The runner image
+must contain every custom node and model the boxed subgraph uses. The default
+runner is model-agnostic: a pinned ComfyUI plus the partition bridge nodes, so
+any node installed in that image can ride inside the box and report normal
+node-level progress.
 
-Workspace flow:
+## Example
 
 ```text
-[Load Image] → [Kao Generate Object To Workspace]
-                         ↑
-       [Workspace Object Intent] / root + world + object
+[Load Image] → [ ☁ Cloud Offload box: [KSampler] → [VAE Decode] ] → [Save Image]
 ```
+
+Only portable boundary values may cross the box edge (`IMAGE`, `MASK`,
+`LATENT`, `CONDITIONING`, `AUDIO`, tensors, JSON-compatible values, byte
+buffers, and file-backed mesh / 3D-file artifacts). Live objects (`MODEL`,
+`CLIP`, `VAE`, control nets, samplers, …) are rejected before a paid runner is
+provisioned; move their loader or producer inside the box.

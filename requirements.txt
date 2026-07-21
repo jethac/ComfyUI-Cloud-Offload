@@ -1,3 +1,6 @@
-# ComfyUI-Kao talks to a running Kao service over HTTP.
-# No direct `kao` Python package dependency is required.
-# Intentionally empty: no package install surface to pin.
+# ComfyUI-Cloud-Offload talks to the standalone Cloud Offload coordinator over
+# HTTP. It does not import the coordinator (cloud_offload) as a Python library.
+#
+# torch, numpy, and Pillow are provided by the host ComfyUI install.
+requests>=2.28
+safetensors>=0.4

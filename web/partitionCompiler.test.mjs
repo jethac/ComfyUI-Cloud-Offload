@@ -30,17 +30,17 @@ test("compiles selected nodes into a gateway and typed bridges", () => {
   assert.equal(result.prompt["2"], undefined)
   assert.equal(result.prompt["3"], undefined)
   const gateway = result.prompt[result.gatewayId]
-  assert.equal(gateway.class_type, "KaoCloudPartitionGateway")
-  assert.equal(result.remoteSpec.runner.profile, "comfyui-omni")
+  assert.equal(gateway.class_type, "CloudPartitionGateway")
+  assert.equal(result.remoteSpec.runner.profile, "comfyui-partition-v1")
   assert.deepEqual(gateway.inputs.input_0000, ["1", 0])
-  const extract = Object.values(result.prompt).find((node) => node.class_type === "KaoCloudPartitionExtract")
-  assert.deepEqual(result.prompt["4"].inputs.images, ["__kao_partition-one_extract_0000", 0])
+  const extract = Object.values(result.prompt).find((node) => node.class_type === "CloudPartitionExtract")
+  assert.deepEqual(result.prompt["4"].inputs.images, ["__comfy_partition-one_extract_0000", 0])
   assert.equal(extract.inputs.type_name, "IMAGE")
 
-  const remoteInput = Object.values(result.remoteSpec.workflow).find((node) => node.class_type === "KaoPartitionInput")
-  const remoteOutput = Object.values(result.remoteSpec.workflow).find((node) => node.class_type === "KaoPartitionOutput")
+  const remoteInput = Object.values(result.remoteSpec.workflow).find((node) => node.class_type === "CloudPartitionInput")
+  const remoteOutput = Object.values(result.remoteSpec.workflow).find((node) => node.class_type === "CloudPartitionOutput")
   assert.equal(remoteInput.inputs.type_name, "IMAGE")
-  assert.deepEqual(result.remoteSpec.workflow["2"].inputs.image, ["__kao_partition-one_remote_input_0000", 0])
+  assert.deepEqual(result.remoteSpec.workflow["2"].inputs.image, ["__comfy_partition-one_remote_input_0000", 0])
   assert.deepEqual(remoteOutput.inputs.value, ["3", 0])
 })
 
@@ -61,7 +61,7 @@ test("deduplicates a remote output consumed by multiple local nodes", () => {
   const { prompt, partition } = fixture()
   prompt["5"] = { class_type: "SaveImage", inputs: { images: ["3", 0] } }
   const result = compilePartition(prompt, partition)
-  const captures = Object.values(result.remoteSpec.workflow).filter((node) => node.class_type === "KaoPartitionOutput")
+  const captures = Object.values(result.remoteSpec.workflow).filter((node) => node.class_type === "CloudPartitionOutput")
   assert.equal(captures.length, 1)
   assert.deepEqual(result.prompt["4"].inputs.images, result.prompt["5"].inputs.images)
 })

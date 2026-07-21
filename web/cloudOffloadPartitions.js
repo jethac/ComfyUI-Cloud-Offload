@@ -2,17 +2,18 @@ import { app } from "/scripts/app.js"
 import { api } from "/scripts/api.js"
 import { compilePartitions } from "./partitionCompiler.js"
 
-const COMMAND_MARK = "Kao.Cloud.MarkSelection"
-const COMMAND_UNMARK = "Kao.Cloud.UnmarkSelection"
-const COMMAND_CONFIGURE = "Kao.Cloud.ConfigureSelection"
-const FLAG = "kao_cloud_partition"
+const COMMAND_MARK = "CloudOffload.MarkSelection"
+const COMMAND_UNMARK = "CloudOffload.UnmarkSelection"
+const COMMAND_CONFIGURE = "CloudOffload.ConfigureSelection"
+const FLAG = "cloud_offload_partition"
+const PROFILE = "comfyui-partition-v1"
 const COLOR = "#4b63d3"
 const RUNNING_COLOR = "#c58a17"
 const COMPLETE_COLOR = "#2f8f55"
 const FAILED_COLOR = "#b13c4a"
 
 function uuid() {
-  return globalThis.crypto?.randomUUID?.() || `kao-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return globalThis.crypto?.randomUUID?.() || `cloud-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
 function selectedItems() {
@@ -33,7 +34,7 @@ function partitionSettings() {
     enabled: true,
     partition_id: uuid(),
     provider: "auto",
-    profile: "comfyui-omni",
+    profile: PROFILE,
     gpu_type: "any",
     min_gpu_ram_gb: 16,
     timeout_seconds: 3600,
@@ -104,9 +105,9 @@ function groupForPartition(partitionId) {
 
 function restoreRunningNodes(group) {
   for (const node of group?.children || group?._children || group?.nodes || []) {
-    if (node.__kaoCloudPreviousColor !== undefined) {
-      node.color = node.__kaoCloudPreviousColor
-      delete node.__kaoCloudPreviousColor
+    if (node.__cloudOffloadPreviousColor !== undefined) {
+      node.color = node.__cloudOffloadPreviousColor
+      delete node.__cloudOffloadPreviousColor
     }
   }
 }
@@ -115,15 +116,15 @@ function markRemoteNode(group, nodeId, color) {
   const node = app.graph?.getNodeById?.(Number.isNaN(Number(nodeId)) ? nodeId : Number(nodeId))
   const members = [...(group?.children || group?._children || group?.nodes || [])]
   if (!node || !members.includes(node)) return
-  if (node.__kaoCloudPreviousColor === undefined) node.__kaoCloudPreviousColor = node.color
+  if (node.__cloudOffloadPreviousColor === undefined) node.__cloudOffloadPreviousColor = node.color
   node.color = color
 }
 
 function previewPanel() {
-  let panel = document.getElementById("kao-cloud-preview")
+  let panel = document.getElementById("cloud-offload-preview")
   if (panel) return panel
   panel = document.createElement("div")
-  panel.id = "kao-cloud-preview"
+  panel.id = "cloud-offload-preview"
   panel.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:9999;padding:8px;background:#171923dd;border:1px solid #4b63d3;border-radius:8px;color:white;font:12px sans-serif;display:none;max-width:280px"
   panel.innerHTML = '<div style="margin-bottom:5px">Cloud Offload preview</div><img style="display:block;max-width:264px;max-height:264px;border-radius:4px" />'
   document.body.appendChild(panel)
@@ -137,8 +138,8 @@ function handlePartitionEvent(message) {
   const group = groupForPartition(partitionId)
   if (!group) return
   const settings = group.flags[FLAG]
-  group.__kaoCloudRuntime ||= {}
-  const runtime = group.__kaoCloudRuntime
+  group.__cloudOffloadRuntime ||= {}
+  const runtime = group.__cloudOffloadRuntime
   runtime.last_event = event
   runtime.job_id = event.job_id || runtime.job_id
   runtime.progress = event.overall_progress ?? runtime.progress ?? 0
@@ -238,7 +239,7 @@ function collectPartitions(graph) {
     if (settings.base_title?.startsWith("☁ Kao Cloud")) {
       settings.base_title = settings.base_title.replace("☁ Kao Cloud", "☁ Cloud Offload")
     }
-    settings.profile = "comfyui-omni"
+    settings.profile = PROFILE
     partitions.push({
       ...settings,
       title: group.title,
@@ -250,7 +251,7 @@ function collectPartitions(graph) {
 }
 
 app.registerExtension({
-  name: "Kao.CloudPartitions",
+  name: "CloudOffload.Partitions",
   commands: [
     {
       id: COMMAND_MARK,
@@ -277,7 +278,7 @@ app.registerExtension({
     return []
   },
   async setup() {
-    api.addEventListener("kao.partition.progress", handlePartitionEvent)
+    api.addEventListener("comfy.partition.progress", handlePartitionEvent)
     const original = app.graphToPrompt.bind(app)
     app.graphToPrompt = async function (...args) {
       const result = await original(...args)
@@ -287,7 +288,7 @@ app.registerExtension({
       const compiled = compilePartitions(result.output, partitions)
       result.output = compiled.prompt
       result.workflow.extra ||= {}
-      result.workflow.extra.kao_cloud_partitions = partitions.map(({ type_map, runtime, ...item }) => item)
+      result.workflow.extra.cloud_offload_partitions = partitions.map(({ type_map, runtime, ...item }) => item)
       return result
     }
   },

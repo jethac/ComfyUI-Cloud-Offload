@@ -1,4 +1,4 @@
-"""Safe, versioned value transport for Kao cloud graph partitions."""
+"""Safe, versioned value transport for Cloud Offload graph partitions."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "kao.partition.bundle.v1"
-ARTIFACT_MARKER = "__kao_partition_artifact__"
+SCHEMA = "comfy.partition.bundle.v1"
+ARTIFACT_MARKER = "__comfy_partition_artifact__"
 MANIFEST_NAME = "manifest.json"
 TENSORS_NAME = "tensors.safetensors"
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
@@ -92,15 +92,15 @@ class _Encoder:
             name = f"blob-{len(self.blobs):08d}"
             self.blobs[name] = bytes(value)
             return {"kind": "bytes", "blob": name}
-        if type(value).__name__ == "KaoMeshArtifact" and hasattr(value, "path"):
+        if type(value).__name__ == "CloudMeshArtifact" and hasattr(value, "path"):
             path = Path(value.path)
             if not path.is_file():
-                raise PartitionProtocolError("Kao mesh artifact is missing its backing file")
+                raise PartitionProtocolError("Mesh artifact is missing its backing file")
             name = f"blob-{len(self.blobs):08d}"
             self.blobs[name] = path.read_bytes()
             return {
                 "kind": "file_artifact",
-                "artifact_type": "kao_mesh",
+                "artifact_type": "cloud_mesh",
                 "blob": name,
                 "format": path.suffix.lstrip(".") or "glb",
                 "metadata": self.encode(getattr(value, "stats", {}) or {}, depth + 1),
@@ -175,7 +175,7 @@ def _decode(node: dict[str, Any], tensors: dict[str, Any], blobs: dict[str, byte
         if name not in blobs:
             raise PartitionProtocolError(f"Missing declared blob: {name}")
         artifact_type = node.get("artifact_type")
-        if artifact_type not in {"kao_mesh", "file_3d"}:
+        if artifact_type not in {"cloud_mesh", "file_3d"}:
             raise PartitionProtocolError(f"Unknown file artifact type: {artifact_type!r}")
         file_format = str(node.get("format") or "glb").lower()
         if not file_format.isalnum() or len(file_format) > 16:

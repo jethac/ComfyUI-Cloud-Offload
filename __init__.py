@@ -1,4 +1,4 @@
-"""ComfyUI-Cloud-Offload: cloud partition and legacy Kao service nodes."""
+"""ComfyUI-Cloud-Offload: run selected ComfyUI nodes on rented cloud GPUs."""
 
 if __package__:
     from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
@@ -8,17 +8,17 @@ else:  # pytest may collect this repository as a top-level module
 try:
     if __package__:
         from .partition_nodes import (
-            KaoCloudPartitionExtract,
-            KaoCloudPartitionGateway,
-            KaoPartitionInput,
-            KaoPartitionOutput,
+            CloudPartitionExtract,
+            CloudPartitionGateway,
+            CloudPartitionInput,
+            CloudPartitionOutput,
         )
     else:
         from partition_nodes import (
-            KaoCloudPartitionExtract,
-            KaoCloudPartitionGateway,
-            KaoPartitionInput,
-            KaoPartitionOutput,
+            CloudPartitionExtract,
+            CloudPartitionGateway,
+            CloudPartitionInput,
+            CloudPartitionOutput,
         )
 except ModuleNotFoundError as exc:
     if exc.name != "comfy_api":
@@ -26,10 +26,10 @@ except ModuleNotFoundError as exc:
 else:
     NODE_CLASS_MAPPINGS.update(
         {
-            "KaoCloudPartitionGateway": KaoCloudPartitionGateway,
-            "KaoCloudPartitionExtract": KaoCloudPartitionExtract,
-            "KaoPartitionInput": KaoPartitionInput,
-            "KaoPartitionOutput": KaoPartitionOutput,
+            "CloudPartitionGateway": CloudPartitionGateway,
+            "CloudPartitionExtract": CloudPartitionExtract,
+            "CloudPartitionInput": CloudPartitionInput,
+            "CloudPartitionOutput": CloudPartitionOutput,
         }
     )
 

@@ -50,7 +50,7 @@ function nodeOutputType(typeMap, nodeId, outputIndex) {
 export function compilePartition(prompt, partition) {
   const local = clone(prompt)
   const members = new Set(partition.members.map(String))
-  const prefix = `__kao_${safeId(partition.partition_id)}`
+  const prefix = `__comfy_${safeId(partition.partition_id)}`
   const remote = {}
   const gatewayInputs = {
     partition_json: "",
@@ -79,7 +79,7 @@ export function compilePartition(prompt, partition) {
       )
       const bridgeId = `${prefix}_remote_${key}`
       remote[bridgeId] = {
-        class_type: "KaoPartitionInput",
+        class_type: "CloudPartitionInput",
         inputs: { boundary_key: key, artifact_path: "", type_name: typeName },
         _meta: { title: `Cloud Offload Input: ${inputName}` },
       }
@@ -103,7 +103,7 @@ export function compilePartition(prompt, partition) {
         )
         const captureId = `${prefix}_remote_${key}`
         remote[captureId] = {
-          class_type: "KaoPartitionOutput",
+          class_type: "CloudPartitionOutput",
           inputs: {
             value: clone(value),
             boundary_key: key,
@@ -125,13 +125,13 @@ export function compilePartition(prompt, partition) {
 
   const gatewayId = `${prefix}_gateway`
   const remoteSpec = {
-    schema: "kao.partition.job.v1",
+    schema: "comfy.partition.job.v1",
     partition_id: partition.partition_id,
     workflow: remote,
     inputs,
     outputs: outputs.map(({ extract_id, ...item }) => item),
     runner: {
-      profile: partition.profile || "comfyui-omni",
+      profile: partition.profile || "comfyui-partition-v1",
       gpu_type: partition.gpu_type || "any",
       min_gpu_ram_gb: Number(partition.min_gpu_ram_gb || 16),
       keep_warm: partition.keep_warm !== false,
@@ -139,13 +139,13 @@ export function compilePartition(prompt, partition) {
   }
   gatewayInputs.partition_json = JSON.stringify(remoteSpec)
   local[gatewayId] = {
-    class_type: "KaoCloudPartitionGateway",
+    class_type: "CloudPartitionGateway",
     inputs: gatewayInputs,
     _meta: { title: partition.title || "Cloud Offload Partition" },
   }
   outputs.forEach((output) => {
     local[output.extract_id] = {
-      class_type: "KaoCloudPartitionExtract",
+      class_type: "CloudPartitionExtract",
       inputs: {
         result: [gatewayId, 0],
         boundary_key: output.key,

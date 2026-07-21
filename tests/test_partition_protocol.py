@@ -13,12 +13,12 @@ def test_bundle_round_trip_nested_tensor_value(tmp_path: Path):
         "metadata": {"seed": 42, "enabled": True, "nothing": None},
         "payload": b"mesh-bytes",
     }
-    path = tmp_path / "value.kaopart"
+    path = tmp_path / "value.part"
 
     metadata = protocol.dump_bundle(value, path)
     restored = protocol.load_bundle(path)
 
-    assert metadata["schema"] == protocol.SCHEMA
+    assert metadata["schema"] == protocol.SCHEMA == "comfy.partition.bundle.v1"
     assert metadata["sha256"] == protocol.bundle_sha256(path)
     assert torch.equal(restored["samples"], value["samples"])
     assert torch.equal(restored["conditioning"][0][0], value["conditioning"][0][0])
@@ -36,7 +36,7 @@ def test_known_live_boundary_types_are_rejected(type_name):
 def test_loader_rejects_path_traversal(tmp_path: Path):
     import zipfile
 
-    path = tmp_path / "unsafe.kaopart"
+    path = tmp_path / "unsafe.part"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("../manifest.json", "{}")
 
@@ -46,22 +46,22 @@ def test_loader_rejects_path_traversal(tmp_path: Path):
 
 def test_unsupported_python_object_is_rejected(tmp_path: Path):
     with pytest.raises(protocol.PartitionProtocolError, match="Unsupported"):
-        protocol.dump_bundle(object(), tmp_path / "bad.kaopart")
+        protocol.dump_bundle(object(), tmp_path / "bad.part")
 
 
-def test_kao_mesh_artifact_round_trip_is_explicit_and_safe(tmp_path: Path):
+def test_cloud_mesh_artifact_round_trip_is_explicit_and_safe(tmp_path: Path):
     mesh_path = tmp_path / "mesh.glb"
     mesh_path.write_bytes(b"glTF-mesh")
-    KaoMeshArtifact = type("KaoMeshArtifact", (), {})
-    mesh = KaoMeshArtifact()
+    CloudMeshArtifact = type("CloudMeshArtifact", (), {})
+    mesh = CloudMeshArtifact()
     mesh.path = mesh_path
     mesh.stats = {"vertices": 12, "faces": 4}
 
-    bundle = tmp_path / "mesh.kaopart"
+    bundle = tmp_path / "mesh.part"
     protocol.dump_bundle(mesh, bundle)
     restored = protocol.load_bundle(bundle)
 
-    assert restored[protocol.ARTIFACT_MARKER] == "kao_mesh"
+    assert restored[protocol.ARTIFACT_MARKER] == "cloud_mesh"
     assert restored["data"] == b"glTF-mesh"
     assert restored["format"] == "glb"
     assert restored["metadata"] == mesh.stats
@@ -73,7 +73,7 @@ def test_comfy_file3d_round_trip_is_explicit_and_safe(tmp_path: Path):
         (),
         {"format": "glb", "get_bytes": lambda self: b"glTF-file"},
     )
-    bundle = tmp_path / "file3d.kaopart"
+    bundle = tmp_path / "file3d.part"
 
     protocol.dump_bundle(File3D(), bundle)
     restored = protocol.load_bundle(bundle)

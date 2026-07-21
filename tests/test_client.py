@@ -1,0 +1,334 @@
+import importlib.util
+import json
+from pathlib import Path
+
+import pytest
+
+import client as client_module
+from client import CloudOffloadClient, CloudOffloadError
+
+
+def load_nodes_module():
+    path = Path(__file__).resolve().parents[1] / "nodes.py"
+    spec = importlib.util.spec_from_file_location("cloud_offload_nodes", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: bytes):
+        self.status = status
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+# -- Discovery ----------------------------------------------------------------
+
+
+def test_discovery_prefers_cloud_offload_url_env(monkeypatch):
+    monkeypatch.setenv("CLOUD_OFFLOAD_URL", "http://127.0.0.1:11599/")
+    monkeypatch.delenv("CLOUD_OFFLOAD_TOKEN", raising=False)
+    service = client_module.discover_service()
+    assert service["url"] == "http://127.0.0.1:11599"
+
+
+def test_discovery_reads_cloud_offload_token_env(monkeypatch):
+    monkeypatch.setenv("CLOUD_OFFLOAD_URL", "http://127.0.0.1:11599")
+    monkeypatch.setenv("CLOUD_OFFLOAD_TOKEN", "secret-token")
+    service = client_module.discover_service()
+    assert service["token"] == "secret-token"
+
+
+def test_discovery_rejects_ollama_port(monkeypatch):
+    monkeypatch.setenv("CLOUD_OFFLOAD_URL", "http://127.0.0.1:11434")
+    with pytest.raises(RuntimeError, match="Ollama"):
+        client_module.discover_service()
+
+
+def test_discovery_falls_back_to_service_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLOUD_OFFLOAD_URL", raising=False)
+    monkeypatch.delenv("CLOUD_OFFLOAD_TOKEN", raising=False)
+    service_file = tmp_path / "service.json"
+    service_file.write_text(json.dumps({"url": "http://127.0.0.1:11588"}), encoding="utf-8")
+    monkeypatch.setenv("CLOUD_OFFLOAD_SERVICE_FILE", str(service_file))
+    service = client_module.discover_service()
+    assert service["url"] == "http://127.0.0.1:11588"
+
+
+def test_discovery_service_file_rejects_ollama_port(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLOUD_OFFLOAD_URL", raising=False)
+    service_file = tmp_path / "service.json"
+    service_file.write_text(json.dumps({"port": 11434, "url": "http://127.0.0.1:11434"}), encoding="utf-8")
+    monkeypatch.setenv("CLOUD_OFFLOAD_SERVICE_FILE", str(service_file))
+    with pytest.raises(RuntimeError, match="Ollama"):
+        client_module.discover_service()
+
+
+def test_discovery_default_when_nothing_configured(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLOUD_OFFLOAD_URL", raising=False)
+    monkeypatch.setenv("CLOUD_OFFLOAD_SERVICE_FILE", str(tmp_path / "missing.json"))
+    service = client_module.discover_service()
+    assert service["url"] == "http://127.0.0.1:11435"
+
+
+def test_health_check_matches_cloud_offload_name(monkeypatch):
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "urlopen",
+        lambda request, timeout=None: _FakeResponse(
+            200, json.dumps({"name": "cloud-offload", "status": "ok"}).encode("utf-8")
+        ),
+    )
+    assert client_module._is_healthy("http://127.0.0.1:11599") is True
+
+
+def test_health_check_rejects_foreign_service(monkeypatch):
+    monkeypatch.setattr(
+        client_module.urllib.request,
+        "urlopen",
+        lambda request, timeout=None: _FakeResponse(
+            200, json.dumps({"name": "Kao", "status": "ok"}).encode("utf-8")
+        ),
+    )
+    assert client_module._is_healthy("http://127.0.0.1:11599") is False
+
+
+# -- Client -------------------------------------------------------------------
+
+
+def test_client_refresh_does_not_health_gate_each_request(monkeypatch):
+    calls = []
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    c._configured_base_url = None
+    monkeypatch.setattr(
+        client_module,
+        "discover_service",
+        lambda require_healthy=False: calls.append(require_healthy)
+        or {"url": "http://127.0.0.1:11501", "token": None},
+    )
+
+    c._refresh_base_url()
+
+    assert calls == [False]
+
+
+def test_run_workflow_polls_until_result(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    statuses = iter(
+        [
+            {"status": "queued", "result": None},
+            {"status": "running", "result": None},
+            {"status": "completed", "result": {"prompt_id": "prompt-1"}},
+        ]
+    )
+    monkeypatch.setattr(c, "submit_workflow", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(c, "job_status", lambda job_id: next(statuses))
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+
+    assert c.run_comfyui_workflow({"workflow": {"1": {}}}) == {"prompt_id": "prompt-1"}
+
+
+def test_run_workflow_raises_on_failed_job(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    monkeypatch.setattr(c, "submit_workflow", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(
+        c, "job_status", lambda job_id: {"status": "failed", "error": "boom"}
+    )
+
+    with pytest.raises(CloudOffloadError, match="boom"):
+        c.run_comfyui_workflow({"workflow": {"1": {}}})
+
+
+def test_partition_is_submitted_as_the_real_comfy_subgraph(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    submitted = []
+    monkeypatch.setattr(
+        c, "upload_partition_artifact", lambda path: {"artifact_id": "a" * 64}
+    )
+    monkeypatch.setattr(
+        c, "submit_partition", lambda payload: submitted.append(payload) or {"job_id": "job-1"}
+    )
+    monkeypatch.setattr(
+        c,
+        "job_status",
+        lambda job_id: {"status": "completed", "result": {"output_artifacts": {}}},
+    )
+    monkeypatch.setattr(c, "job_events", lambda job_id, after=0: {"events": []})
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+
+    partition = {
+        "schema": "comfy.partition.job.v1",
+        "partition_id": "part-1",
+        "runner": {"profile": "comfyui-partition-v1"},
+        "workflow": {
+            "1": {
+                "class_type": "SomeNativeNode",
+                "inputs": {"image": ["input", 0], "steps": 12},
+            },
+            "input": {
+                "class_type": "CloudPartitionInput",
+                "inputs": {"boundary_key": "input_0000"},
+            },
+            "output": {
+                "class_type": "CloudPartitionOutput",
+                "inputs": {"value": ["1", 0], "boundary_key": "output_0000"},
+            },
+        },
+        "outputs": [
+            {"key": "output_0000", "source_node": "1", "source_output": 0, "type": "IMAGE"}
+        ],
+    }
+
+    result = c.run_comfyui_partition(partition, {"input_0000": 7}, provider="runpod")
+
+    assert result["job_id"] == "job-1"
+    assert submitted[0]["provider"] == "runpod"
+    assert submitted[0]["input_artifacts"]["input_0000"] == "a" * 64
+    assert submitted[0]["partition"]["runner"]["profile"] == "comfyui-partition-v1"
+    assert submitted[0]["partition"]["schema"] == "comfy.partition.job.v1"
+
+
+def test_partition_raises_on_failed_job(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    monkeypatch.setattr(c, "submit_partition", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(
+        c, "job_status", lambda job_id: {"status": "failed", "error": "boom"}
+    )
+    monkeypatch.setattr(c, "job_events", lambda job_id, after=0: {"events": []})
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+
+    partition = {
+        "schema": "comfy.partition.job.v1",
+        "partition_id": "p",
+        "workflow": {},
+        "outputs": [],
+    }
+    with pytest.raises(CloudOffloadError, match="boom"):
+        c.run_comfyui_partition(partition, {}, provider="runpod")
+
+
+def test_partition_cancels_when_comfyui_interrupts(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    cancelled = []
+    monkeypatch.setattr(c, "submit_partition", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(
+        client_module,
+        "_throw_if_processing_interrupted",
+        lambda: (_ for _ in ()).throw(RuntimeError("interrupted")),
+    )
+    monkeypatch.setattr(
+        c, "cancel_job", lambda job_id: cancelled.append(job_id) or {"status": "cancelled"}
+    )
+
+    partition = {
+        "schema": "comfy.partition.job.v1",
+        "partition_id": "p",
+        "workflow": {},
+        "outputs": [],
+    }
+    with pytest.raises(RuntimeError, match="interrupted"):
+        c.run_comfyui_partition(partition, {}, provider="runpod")
+    assert cancelled == ["job-1"]
+
+
+# -- Nodes --------------------------------------------------------------------
+
+
+def test_cloud_workflow_node_forwards_api_prompt_and_image(monkeypatch):
+    nodes = load_nodes_module()
+    submitted = []
+    monkeypatch.setattr(nodes, "_image_to_b64", lambda image: "encoded-image")
+    monkeypatch.setattr(
+        nodes.client,
+        "run_comfyui_workflow",
+        lambda payload: submitted.append(payload) or {"outputs": {}, "images": []},
+    )
+
+    first_image, result_json = nodes.CloudWorkflow().execute(
+        '{"1":{"class_type":"LoadImage","inputs":{"image":"input.png"}}}',
+        provider="runpod",
+        input_filename="input.png",
+        timeout_seconds=900,
+        image=object(),
+    )
+
+    assert tuple(first_image.shape) == (1, 1, 1, 3)
+    assert json.loads(result_json)["outputs"] == {}
+    assert submitted[0]["inputs"] == {"input.png": "encoded-image"}
+    assert submitted[0]["provider"] == "runpod"
+
+
+def test_cloud_status_node_returns_provider_balances(monkeypatch):
+    nodes = load_nodes_module()
+    monkeypatch.setattr(
+        nodes.client,
+        "status",
+        lambda: {
+            "providers": [
+                {"provider": "vast.ai", "balance": {"balance": 0.0, "credit": 10.0}}
+            ]
+        },
+    )
+
+    payload = json.loads(nodes.CloudStatus().status()[0])
+
+    assert payload["providers"][0]["balance"]["credit"] == 10.0
+
+
+def test_node_mappings_expose_only_neutral_surface():
+    nodes = load_nodes_module()
+
+    assert set(nodes.NODE_CLASS_MAPPINGS) == {"CloudStatus", "CloudWorkflow"}
+    for legacy in (
+        "KaoImageTo3D",
+        "KaoMultiViewTo3D",
+        "KaoImageToScene",
+        "KaoSaveMesh",
+        "KaoMeshPreview",
+        "KaoCloudStatus",
+        "KaoCloudComfyUIWorkflow",
+        "KaoSelectModel",
+        "KaoLoadModel",
+        "KaoWorkspaceProjectState",
+        "KaoWorkspaceObjectIntent",
+        "KaoGenerateObjectToWorkspace",
+        "KaoWorkspaceSaveMesh",
+        "KaoWorkspaceMaterialIntent",
+    ):
+        assert legacy not in nodes.NODE_CLASS_MAPPINGS
+        assert not hasattr(nodes, legacy)
+
+
+def test_partition_nodes_use_neutral_class_and_wire_ids():
+    pytest.importorskip("comfy_api.latest")
+    import partition_nodes
+
+    assert partition_nodes.CloudPartitionGateway.define_schema().node_id == "CloudPartitionGateway"
+    assert partition_nodes.CloudPartitionExtract.define_schema().node_id == "CloudPartitionExtract"
+    assert partition_nodes.CloudPartitionInput.define_schema().node_id == "CloudPartitionInput"
+    assert partition_nodes.CloudPartitionOutput.define_schema().node_id == "CloudPartitionOutput"
+    for node in (
+        partition_nodes.CloudPartitionGateway,
+        partition_nodes.CloudPartitionInput,
+        partition_nodes.CloudPartitionOutput,
+    ):
+        assert node.define_schema().category.startswith("Cloud Offload")
+
+
+def test_partition_path_requires_comfy_partition_root(monkeypatch):
+    pytest.importorskip("comfy_api.latest")
+    import partition_nodes
+
+    monkeypatch.delenv("COMFY_PARTITION_ROOT", raising=False)
+    with pytest.raises(CloudOffloadError, match="COMFY_PARTITION_ROOT"):
+        partition_nodes._partition_path("whatever.part", must_exist=False)

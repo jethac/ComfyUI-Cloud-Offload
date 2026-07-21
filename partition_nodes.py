@@ -1,4 +1,4 @@
-"""V3 dynamic bridge nodes for transparent Kao cloud graph partitions."""
+"""V3 dynamic bridge nodes for transparent Cloud Offload graph partitions."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 from comfy_api.latest import ComfyExtension, io
 
 try:
-    from .nodes import KaoMeshArtifact, KaoServiceError, _file_3d_glb, client
+    from .client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client
     from .partition_protocol import (
         ARTIFACT_MARKER,
         dump_bundle,
@@ -21,11 +21,11 @@ try:
         validate_boundary_type,
     )
 except ImportError:
-    from nodes import KaoMeshArtifact, KaoServiceError, _file_3d_glb, client
+    from client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client
     from partition_protocol import ARTIFACT_MARKER, dump_bundle, load_bundle, validate_boundary_type
 
 
-PartitionResult = io.Custom("KAO_PARTITION_RESULT")
+PartitionResult = io.Custom("CLOUD_PARTITION_RESULT")
 
 
 def _restore_file_artifact(value: Any, type_name: str) -> Any:
@@ -33,42 +33,42 @@ def _restore_file_artifact(value: Any, type_name: str) -> Any:
         return value
     artifact_type = value.get(ARTIFACT_MARKER)
     normalized_type = str(type_name or "").upper()
-    if artifact_type == "kao_mesh" and normalized_type != "KAO_MESH":
-        raise KaoServiceError("Cloud partition returned a mesh for an incompatible socket")
+    if artifact_type == "cloud_mesh" and normalized_type != "KAO_MESH":
+        raise CloudOffloadError("Cloud partition returned a mesh for an incompatible socket")
     if artifact_type == "file_3d" and not normalized_type.startswith("FILE_3D"):
-        raise KaoServiceError("Cloud partition returned a 3D file for an incompatible socket")
+        raise CloudOffloadError("Cloud partition returned a 3D file for an incompatible socket")
     file_format = str(value.get("format") or "glb").lower()
-    output_dir = Path(tempfile.gettempdir()) / "comfyui-kao" / "partitions"
+    output_dir = Path(tempfile.gettempdir()) / "comfyui-cloud-offload" / "partitions"
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{uuid.uuid4().hex}.{file_format}"
     path.write_bytes(bytes(value.get("data") or b""))
-    if artifact_type == "kao_mesh":
-        return KaoMeshArtifact(path, value.get("metadata") or {})
+    if artifact_type == "cloud_mesh":
+        return CloudMeshArtifact(path, value.get("metadata") or {})
     return _file_3d_glb(path)
 
 
 def _partition_path(value: str, *, must_exist: bool) -> Path:
-    root = Path(os.environ.get("KAO_PARTITION_ROOT", "")).resolve()
+    root = Path(os.environ.get("COMFY_PARTITION_ROOT", "")).resolve()
     if not str(root) or str(root) == str(Path(".").resolve()):
-        raise KaoServiceError("KAO_PARTITION_ROOT is not configured for partition bridge nodes")
+        raise CloudOffloadError("COMFY_PARTITION_ROOT is not configured for partition bridge nodes")
     path = Path(value).resolve()
     try:
         path.relative_to(root)
     except ValueError as exc:
-        raise KaoServiceError("Partition artifact path escapes KAO_PARTITION_ROOT") from exc
+        raise CloudOffloadError("Partition artifact path escapes COMFY_PARTITION_ROOT") from exc
     if must_exist and not path.is_file():
-        raise KaoServiceError(f"Partition input artifact does not exist: {path.name}")
+        raise CloudOffloadError(f"Partition input artifact does not exist: {path.name}")
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 
-class KaoCloudPartitionGateway(io.ComfyNode):
+class CloudPartitionGateway(io.ComfyNode):
     """Invisible local proxy that pauses execution while a cloud subgraph runs."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="KaoCloudPartitionGateway",
+            node_id="CloudPartitionGateway",
             display_name="Cloud Offload Partition Gateway",
             category="Cloud Offload/Internal",
             description="Compiler-generated asynchronous Cloud Offload gateway.",
@@ -95,9 +95,9 @@ class KaoCloudPartitionGateway(io.ComfyNode):
         try:
             partition = json.loads(partition_json)
         except json.JSONDecodeError as exc:
-            raise KaoServiceError(f"Compiled partition JSON is invalid: {exc}") from exc
-        if partition.get("schema") != "kao.partition.job.v1":
-            raise KaoServiceError("Unsupported compiled Kao partition schema")
+            raise CloudOffloadError(f"Compiled partition JSON is invalid: {exc}") from exc
+        if partition.get("schema") != "comfy.partition.job.v1":
+            raise CloudOffloadError("Unsupported compiled partition schema")
         inputs = {key: value for key, value in boundary_values.items() if key.startswith("input_")}
 
         try:
@@ -115,7 +115,7 @@ class KaoCloudPartitionGateway(io.ComfyNode):
             if PromptServer is not None:
                 server = PromptServer.instance
                 server.send_sync(
-                    "kao.partition.progress",
+                    "comfy.partition.progress",
                     {
                         "partition_id": partition.get("partition_id"),
                         "event": event,
@@ -151,13 +151,13 @@ class KaoCloudPartitionGateway(io.ComfyNode):
         return io.NodeOutput(result)
 
 
-class KaoCloudPartitionExtract(io.ComfyNode):
+class CloudPartitionExtract(io.ComfyNode):
     """Restore one ordinary Comfy value from an opaque partition result."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="KaoCloudPartitionExtract",
+            node_id="CloudPartitionExtract",
             display_name="Cloud Offload Partition Output",
             category="Cloud Offload/Internal",
             inputs=[
@@ -174,19 +174,19 @@ class KaoCloudPartitionExtract(io.ComfyNode):
         validate_boundary_type(type_name)
         values = result.get("values") or {}
         if boundary_key not in values:
-            raise KaoServiceError(f"Cloud partition returned no output for {boundary_key}")
+            raise CloudOffloadError(f"Cloud partition returned no output for {boundary_key}")
         return io.NodeOutput(_restore_file_artifact(values[boundary_key], type_name))
 
 
-class KaoPartitionInput(io.ComfyNode):
+class CloudPartitionInput(io.ComfyNode):
     """Runner-only bridge that restores an uploaded boundary value."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="KaoPartitionInput",
-            display_name="Kao Partition Input",
-            category="Kao/Cloud/Internal",
+            node_id="CloudPartitionInput",
+            display_name="Cloud Partition Input",
+            category="Cloud Offload/Internal",
             inputs=[
                 io.String.Input("boundary_key"),
                 io.String.Input("artifact_path"),
@@ -202,15 +202,15 @@ class KaoPartitionInput(io.ComfyNode):
         return io.NodeOutput(load_bundle(_partition_path(artifact_path, must_exist=True)))
 
 
-class KaoPartitionOutput(io.ComfyNode):
+class CloudPartitionOutput(io.ComfyNode):
     """Runner-only output node that writes a safe typed boundary bundle."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="KaoPartitionOutput",
-            display_name="Kao Partition Output",
-            category="Kao/Cloud/Internal",
+            node_id="CloudPartitionOutput",
+            display_name="Cloud Partition Output",
+            category="Cloud Offload/Internal",
             inputs=[
                 io.AnyType.Input("value"),
                 io.String.Input("boundary_key"),
@@ -231,18 +231,18 @@ class KaoPartitionOutput(io.ComfyNode):
         metadata = dump_bundle(value, path)
         return io.NodeOutput(
             ui={
-                "kao_partition_artifacts": [
+                "comfy_partition_artifacts": [
                     {"boundary_key": boundary_key, "path": str(path), **metadata}
                 ]
             }
         )
 
 
-class KaoPartitionExtension(ComfyExtension):
+class CloudPartitionExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
-            KaoCloudPartitionGateway,
-            KaoCloudPartitionExtract,
-            KaoPartitionInput,
-            KaoPartitionOutput,
+            CloudPartitionGateway,
+            CloudPartitionExtract,
+            CloudPartitionInput,
+            CloudPartitionOutput,
         ]
