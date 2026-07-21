@@ -34,19 +34,15 @@ let Kao route it, and optionally choose `vast.ai` or `runpod`. Provider
 credentials remain in Kao and are never handled by ComfyUI-Kao. Cancelling a
 ComfyUI workflow forwards cancellation to its active Kao job.
 
-Model dropdowns come from Kao's readiness-aware `/api/models` endpoint and are
-filtered by both node task and execution choice. Local only shows models whose
-adapter, exact cached weights, and hardware checks pass; cloud only shows models
-covered by a configured immutable worker profile; auto is their union. If none
-are runnable, the node reports the readiness failure instead of offering a model
-that will predictably fail after submission.
+Each generation node owns its model/runtime choice. Generation nodes have no
+provider, execution, model selector, or inline `model_name` controls.
+Cloud placement and provider selection belong exclusively to a visible **Cloud
+Offload** box around the nodes to run remotely.
 
 ## Nodes
 
 | Node | Description |
 |------|-------------|
-| **Kao Load Model** | Load a Kao model (hunyuan3d-2.1-turbo, etc.) |
-| **Kao Select Model** | Select a model for cloud work without loading it locally |
 | **Kao Cloud Status** | Show routing, workers, and Vast.ai/RunPod balances as JSON |
 | **Kao Image → 3D** | Generate a mesh with standard GLB preview and optional texture outputs |
 | **Kao Multi-View → 3D** | Generate mesh from front/left/back views |
@@ -81,15 +77,23 @@ service remains the authority for the actual workspace root:
 
 ```text
 [Load Image] → [Kao Image → 3D] → [Kao Save Mesh]
-                         ↓
-          model_name: hunyuan3d-2.1-turbo
 ```
 
-`Kao Image → 3D` defaults to `hunyuan3d-2.1-turbo` and asks Kao to load
-the selected model on demand for local execution. Its optional `model` socket
-is retained for advanced workflows and compatibility with existing `Kao Load
-Model` and `Kao Select Model` connections; a connected model takes precedence
-over the inline dropdown.
+`Kao Image → 3D` uses `hunyuan3d-2.1-turbo`. To run it remotely, draw a
+**Cloud Offload** box around the generation node; the box's
+provider and runner settings are authoritative.
+
+### Cloud Offload
+
+Select one or more nodes and choose **Cloud Offload selection** from ComfyUI's
+selection toolbox. The visible box owns provider, GPU, timeout, and warm-runner
+policy. Nodes remain expanded and receive incremental remote progress.
+
+The runner must contain every custom node and model used by the submitted
+workflow. Cloud Offload uses the `comfyui-omni` runtime, which includes pinned
+copies of ComfyUI-Kao, ComfyUI-See-through, ComfyUI-Grounding, and the Kao 3D
+generation runtime. Kao nodes remain ordinary nodes in the submitted subgraph,
+so mixed boxes execute as one graph and report normal node-level progress.
 
 Workspace flow:
 

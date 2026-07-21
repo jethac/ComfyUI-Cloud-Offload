@@ -5,6 +5,7 @@ ComfyUI-Kao: Kao service nodes for ComfyUI.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -31,7 +32,6 @@ KAO_URL_ENV = "KAO_URL"
 KAO_TOKEN_ENV = "KAO_TOKEN"
 KAO_API_HEALTH_TIMEOUT = 0.1
 KAO_CONNECT_TIMEOUT = 0.005
-EXECUTION_TARGETS = ["local", "auto", "cloud"]
 CLOUD_PROVIDERS = ["auto", "vast.ai", "runpod"]
 DEFAULT_WORKSPACE_ROOT = r"B:\lab\Kao"
 DEFAULT_IMAGE_TO_3D_MODEL = "hunyuan3d-2.1-turbo"
@@ -358,6 +358,76 @@ class KaoClient:
     def create_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._json("POST", "/api/jobs", payload=payload, timeout=10)
 
+    def create_comfyui_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json(
+            "POST", "/api/cloud/comfyui/jobs", payload=payload, timeout=30
+        )
+
+    def create_comfyui_partition_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json(
+            "POST", "/api/cloud/comfyui/partitions", payload=payload, timeout=30
+        )
+
+    def upload_partition_artifact(self, path: str | Path) -> Dict[str, Any]:
+        """Stream a bundle to Kao without base64 or loading it all into memory."""
+        import requests
+
+        self._refresh_base_url()
+        path = Path(path)
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        with path.open("rb") as handle:
+            response = requests.post(
+                self._url("/api/cloud/artifacts"),
+                headers=self._headers({"Accept": "application/json"}),
+                data={"sha256": digest.hexdigest()},
+                files={"file": (path.name, handle, "application/vnd.kao.partition+zip")},
+                timeout=max(120, self.timeout),
+            )
+        if not response.ok:
+            raise KaoServiceError(f"Kao artifact upload failed: {response.text}")
+        return response.json()
+
+    def download_partition_artifact(self, artifact_id: str, path: str | Path) -> Path:
+        """Stream and verify a content-addressed bundle from Kao."""
+        import requests
+
+        self._refresh_base_url()
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        response = requests.get(
+            self._url(f"/api/cloud/artifacts/{urllib.parse.quote(artifact_id)}"),
+            headers=self._headers({"Accept": "application/vnd.kao.partition+zip"}),
+            stream=True,
+            timeout=max(120, self.timeout),
+        )
+        if not response.ok:
+            raise KaoServiceError(f"Kao artifact download failed: {response.text}")
+        digest = hashlib.sha256()
+        with path.open("wb") as handle:
+            for chunk in response.iter_content(1024 * 1024):
+                if chunk:
+                    digest.update(chunk)
+                    handle.write(chunk)
+        if digest.hexdigest() != artifact_id:
+            path.unlink(missing_ok=True)
+            raise KaoServiceError(f"Kao artifact digest mismatch: {artifact_id}")
+        return path
+
+    def cloud_job_status(self, job_id: str) -> Dict[str, Any]:
+        return self._json(
+            "GET", f"/api/cloud/jobs/{urllib.parse.quote(job_id)}", timeout=10
+        )
+
+    def cloud_job_events(self, job_id: str, after: int = 0) -> Dict[str, Any]:
+        return self._json(
+            "GET",
+            f"/api/cloud/jobs/{urllib.parse.quote(job_id)}/events?after={max(0, int(after))}",
+            timeout=10,
+        )
+
     def job_status(self, job_id: str) -> Dict[str, Any]:
         return self._json("GET", f"/api/jobs/{urllib.parse.quote(job_id)}", timeout=10)
 
@@ -371,10 +441,16 @@ class KaoClient:
             "POST", f"/api/jobs/{urllib.parse.quote(job_id)}/cancel", timeout=10
         )
 
-    def generate_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def generate_job(
+        self,
+        payload: Dict[str, Any],
+        *,
+        progress_callback: Any | None = None,
+        timeout_seconds: int | None = None,
+    ) -> Dict[str, Any]:
         job = self.create_job(payload)
         job_id = job["job_id"]
-        deadline = time.monotonic() + self.timeout
+        deadline = time.monotonic() + max(1, int(timeout_seconds or self.timeout))
         last_poll_error: Optional[KaoServiceError] = None
         while True:
             try:
@@ -398,6 +474,13 @@ class KaoClient:
                 time.sleep(1)
                 continue
             state = status.get("status")
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        **status,
+                        "job_id": job_id,
+                    }
+                )
             if state == "completed":
                 return self.job_result(job_id)
             if state == "failed":
@@ -407,6 +490,319 @@ class KaoClient:
             if state in {"cancelled", "cancel_requested"}:
                 raise KaoServiceError("Kao generation job was cancelled")
             time.sleep(1)
+
+    def run_comfyui_workflow(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Submit and wait for a workflow on the Kao ComfyUI cloud profile."""
+        job = self.create_comfyui_job(payload)
+        job_id = job["job_id"]
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                _throw_if_processing_interrupted()
+            except Exception:
+                try:
+                    self._json(
+                        "POST",
+                        f"/api/cloud/jobs/{urllib.parse.quote(job_id)}/cancel",
+                        timeout=10,
+                    )
+                finally:
+                    raise
+            status = self.cloud_job_status(job_id)
+            state = status.get("status")
+            if state == "completed":
+                return status.get("result") or {}
+            if state in {"failed", "dead_letter"}:
+                raise KaoServiceError(
+                    status.get("error") or "Cloud ComfyUI workflow failed"
+                )
+            if time.monotonic() >= deadline:
+                raise KaoServiceError(
+                    f"Timed out waiting for cloud ComfyUI workflow {job_id}"
+                )
+            time.sleep(1)
+
+    def run_comfyui_partition(
+        self,
+        partition: Dict[str, Any],
+        boundary_values: Dict[str, Any],
+        *,
+        provider: str = "auto",
+        timeout_seconds: int = 3600,
+        progress_callback: Any | None = None,
+    ) -> Dict[str, Any]:
+        """Serialize inputs, execute a compiled partition, and restore outputs."""
+        try:
+            from .partition_protocol import dump_bundle, load_bundle
+        except ImportError:
+            from partition_protocol import dump_bundle, load_bundle
+
+        with tempfile.TemporaryDirectory(prefix="kao-partition-") as temporary:
+            root = Path(temporary)
+            input_artifacts: Dict[str, str] = {}
+            for boundary_key, value in boundary_values.items():
+                path = root / f"{boundary_key}.kaopart"
+                dump_bundle(value, path)
+                uploaded = self.upload_partition_artifact(path)
+                input_artifacts[boundary_key] = uploaded["artifact_id"]
+            job = self.create_comfyui_partition_job(
+                {
+                    "partition": partition,
+                    "input_artifacts": input_artifacts,
+                    "provider": provider,
+                    "timeout_seconds": int(timeout_seconds),
+                }
+            )
+            job_id = job["job_id"]
+            deadline = time.monotonic() + int(timeout_seconds)
+            event_cursor = 0
+            while True:
+                try:
+                    _throw_if_processing_interrupted()
+                except Exception:
+                    try:
+                        self._json(
+                            "POST",
+                            f"/api/cloud/jobs/{urllib.parse.quote(job_id)}/cancel",
+                            timeout=10,
+                        )
+                    finally:
+                        raise
+                status = self.cloud_job_status(job_id)
+                try:
+                    event_page = self.cloud_job_events(job_id, event_cursor)
+                    for item in event_page.get("events") or []:
+                        event_cursor = max(event_cursor, int(item.get("sequence") or 0))
+                        if progress_callback is not None:
+                            progress_callback(
+                                {
+                                    **(item.get("event") or {}),
+                                    "sequence": item.get("sequence"),
+                                    "created_at": item.get("created_at"),
+                                    "job_id": job_id,
+                                }
+                            )
+                except KaoServiceError:
+                    # Status completion remains authoritative; a transient event-page
+                    # read is retried on the next poll from the last durable cursor.
+                    pass
+                state = status.get("status")
+                if state == "completed":
+                    result = status.get("result") or {}
+                    values = {}
+                    for boundary_key, artifact_id in (result.get("output_artifacts") or {}).items():
+                        path = root / f"result-{boundary_key}.kaopart"
+                        self.download_partition_artifact(artifact_id, path)
+                        values[boundary_key] = load_bundle(path)
+                    return {**result, "values": values, "job_id": job_id}
+                if state in {"failed", "dead_letter"}:
+                    raise KaoServiceError(status.get("error") or "Cloud partition failed")
+                if time.monotonic() >= deadline:
+                    raise KaoServiceError(f"Cloud partition {job_id} exceeded {timeout_seconds}s")
+                time.sleep(1)
+
+    def _run_native_kao_partition(
+        self,
+        partition: Dict[str, Any],
+        boundary_values: Dict[str, Any],
+        *,
+        provider: str,
+        timeout_seconds: int,
+        progress_callback: Any | None,
+    ) -> Dict[str, Any] | None:
+        """Route a single native Kao workload directly to its model worker.
+
+        Kao generation nodes are service clients, not model implementations. Sending
+        one through a generic ComfyUI runner would create a nested cloud submission
+        and strand file-backed outputs on the wrong machine. Cloud Offload therefore
+        lowers a supported single-node partition directly to the corresponding Kao
+        generation job while preserving the original node's progress identity.
+        """
+        workflow = partition.get("workflow") or {}
+        bridge_types = {"KaoPartitionInput", "KaoPartitionOutput"}
+        workload = [
+            (str(node_id), node)
+            for node_id, node in workflow.items()
+            if node.get("class_type") not in bridge_types
+        ]
+        supported = {"KaoImageTo3D", "KaoMultiViewTo3D", "KaoImageToScene"}
+        if len(workload) != 1 or workload[0][1].get("class_type") not in supported:
+            return None
+
+        node_id, node = workload[0]
+        input_bridges = {
+            str(bridge_id): str(bridge.get("inputs", {}).get("boundary_key", ""))
+            for bridge_id, bridge in workflow.items()
+            if bridge.get("class_type") == "KaoPartitionInput"
+        }
+
+        def resolve(value: Any) -> Any:
+            if (
+                isinstance(value, list)
+                and len(value) == 2
+                and str(value[0]) in input_bridges
+            ):
+                key = input_bridges[str(value[0])]
+                if key not in boundary_values:
+                    raise KaoServiceError(
+                        f"Cloud Offload input {key!r} is missing for node {node_id}"
+                    )
+                return boundary_values[key]
+            if isinstance(value, list) and len(value) == 2:
+                raise KaoServiceError(
+                    "A native Kao Cloud Offload partition may contain one generation "
+                    "node; include upstream processing in a separate box"
+                )
+            return value
+
+        inputs = {name: resolve(value) for name, value in (node.get("inputs") or {}).items()}
+        class_type = str(node["class_type"])
+        route = {"execution": "cloud"}
+        if provider != "auto":
+            route["provider"] = provider
+        runner = partition.get("runner") or {}
+        route.update(
+            {
+                "gpu_type": str(runner.get("gpu_type") or "any"),
+                "min_gpu_ram_gb": max(
+                    1, min(256, int(runner.get("min_gpu_ram_gb") or 16))
+                ),
+                "keep_warm": runner.get("keep_warm") is not False,
+            }
+        )
+
+        if progress_callback is not None:
+            progress_callback(
+                {"type": "executing", "node_id": node_id, "overall_progress": 5}
+            )
+
+        last_job_id = None
+
+        def progress(status: Dict[str, Any]) -> None:
+            nonlocal last_job_id
+            last_job_id = status.get("job_id") or last_job_id
+            raw = int(status.get("progress") or 0)
+            overall = max(5, min(95, raw))
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "type": "progress",
+                        "node_id": node_id,
+                        "job_id": last_job_id,
+                        "data": {"value": raw, "max": 100},
+                        "overall_progress": overall,
+                    }
+                )
+
+        if class_type == "KaoImageTo3D":
+            selected_model = inputs.get("model") or DEFAULT_IMAGE_TO_3D_MODEL
+            response = self.generate_job(
+                {
+                    "model": selected_model,
+                    "image": _image_to_b64(inputs["image"]),
+                    "steps": int(inputs.get("steps", 30)),
+                    "guidance_scale": float(inputs.get("guidance_scale", 5.0)),
+                    "seed": int(inputs.get("seed", -1)),
+                    "octree_resolution": int(inputs.get("octree_resolution", 256)),
+                    "remove_background": bool(inputs.get("remove_background", True)),
+                    "generate_texture": bool(inputs.get("generate_texture", False)),
+                    "output_format": "glb",
+                    **route,
+                },
+                progress_callback=progress,
+                timeout_seconds=timeout_seconds,
+            )
+            mesh = _mesh_from_response(response)
+            texture = (
+                _texture_from_glb(mesh.path)
+                if bool(inputs.get("generate_texture", False))
+                else None
+            )
+            if bool(inputs.get("generate_texture", False)) and texture is None:
+                raise KaoServiceError(
+                    "Kao returned a GLB without an embedded base-color texture"
+                )
+            node_outputs = (
+                mesh,
+                response.get("seed", int(inputs.get("seed", -1))),
+                _file_3d_glb(mesh.path),
+                texture,
+            )
+        elif class_type == "KaoMultiViewTo3D":
+            response = self.generate_job(
+                {
+                    "model": "hunyuan3d-2mv",
+                    "images": {
+                        name: _image_to_b64(inputs[name])
+                        for name in ("front", "left", "back")
+                    },
+                    "steps": int(inputs.get("steps", 30)),
+                    "seed": int(inputs.get("seed", -1)),
+                    "octree_resolution": int(inputs.get("octree_resolution", 380)),
+                    "remove_background": bool(inputs.get("remove_background", True)),
+                    "output_format": "glb",
+                    **route,
+                },
+                progress_callback=progress,
+                timeout_seconds=timeout_seconds,
+            )
+            node_outputs = (
+                _mesh_from_response(response),
+                response.get("seed", int(inputs.get("seed", -1))),
+            )
+        else:
+            output_types = ["pointcloud"]
+            if bool(inputs.get("output_depth", True)):
+                output_types.append("depth")
+            if bool(inputs.get("output_normals", False)):
+                output_types.append("normals")
+            response = self.generate_job(
+                {
+                    "model": "world-mirror",
+                    "image": _image_to_b64(inputs["image"]),
+                    "output_types": output_types,
+                    **route,
+                },
+                progress_callback=progress,
+                timeout_seconds=timeout_seconds,
+            )
+            node_outputs = (
+                base64.b64decode(response["pointcloud"])
+                if response.get("pointcloud")
+                else None,
+                _decode_image_tensor(response.get("depth")),
+                _decode_image_tensor(response.get("normals")),
+            )
+
+        values: Dict[str, Any] = {}
+        for output in partition.get("outputs") or []:
+            if str(output.get("source_node")) != node_id:
+                raise KaoServiceError(
+                    "Native Kao Cloud Offload outputs must come from its generation node"
+                )
+            index = int(output.get("source_output", 0))
+            if index < 0 or index >= len(node_outputs):
+                raise KaoServiceError(
+                    f"Cloud Offload requested invalid output {index} from node {node_id}"
+                )
+            values[str(output["key"])] = node_outputs[index]
+
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "type": "executed",
+                    "node_id": node_id,
+                    "job_id": last_job_id,
+                    "overall_progress": 100,
+                }
+            )
+        return {
+            "schema": "kao.partition.result.v1",
+            "partition_id": partition.get("partition_id"),
+            "job_id": last_job_id,
+            "values": values,
+            "native_kao": True,
+        }
 
     def project_state(self, world: str) -> Dict[str, Any]:
         return self._json("GET", f"/api/workspace/projects/{urllib.parse.quote(world)}")
@@ -516,6 +912,22 @@ def _file_3d_glb(path: Path):
     return Types.File3D(str(path), "glb")
 
 
+def _generation_progress_callback():
+    try:
+        from comfy.utils import ProgressBar
+    except ImportError:
+        return None
+    progress_bar = ProgressBar(100)
+
+    def report(status: Dict[str, Any]) -> None:
+        progress = status.get("progress")
+        if progress is None:
+            return
+        progress_bar.update_absolute(max(0, min(100, int(float(progress)))), 100)
+
+    return report
+
+
 def _texture_from_glb(path: Path):
     data = path.read_bytes()
     if len(data) < 20 or data[:4] != b"glTF":
@@ -589,13 +1001,6 @@ def _object_payload(object: str, **kwargs) -> Dict[str, Any]:
     return {"object_name": object, "object": object, **kwargs}
 
 
-def _execution_payload(execution: str, provider: str) -> Dict[str, str]:
-    payload = {"execution": execution}
-    if provider != "auto":
-        payload["provider"] = provider
-    return payload
-
-
 def _throw_if_processing_interrupted() -> None:
     """Forward ComfyUI cancellation to Kao without requiring ComfyUI in tests."""
     try:
@@ -606,13 +1011,12 @@ def _throw_if_processing_interrupted() -> None:
 
 
 class KaoLoadModel:
-    """Load a Kao model into the service process."""
+    """Select a Kao model without deciding where it will execute."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {"model_name": (get_model_list(execution="local"),)},
-            "optional": {"load_locally": ("BOOLEAN", {"default": True})},
+            "required": {"model": (get_model_list(execution="auto"),)},
         }
 
     RETURN_TYPES = ("KAO_MODEL",)
@@ -620,12 +1024,10 @@ class KaoLoadModel:
     FUNCTION = "load"
     CATEGORY = "Kao"
 
-    def load(self, model_name: str, load_locally: bool = True):
-        if model_name == NO_RUNNABLE_MODELS:
-            raise KaoServiceError("Kao reports no locally runnable models")
-        if load_locally:
-            client.load(model_name)
-        return (model_name,)
+    def load(self, model: str):
+        if model == NO_RUNNABLE_MODELS:
+            raise KaoServiceError("Kao reports no runnable models")
+        return (model,)
 
 
 class KaoSelectModel:
@@ -662,12 +1064,72 @@ class KaoCloudStatus:
         return (json.dumps(client.cloud_status(), indent=2, sort_keys=True),)
 
 
+class KaoCloudComfyUIWorkflow:
+    """Execute an API-format ComfyUI workflow on a Kao cloud runner."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "workflow_api_json": (
+                    "STRING",
+                    {"multiline": True, "default": "{}"},
+                ),
+                "provider": (CLOUD_PROVIDERS, {"default": "auto"}),
+                "input_filename": (
+                    "STRING",
+                    {"default": "kao_cloud_input.png"},
+                ),
+                "timeout_seconds": (
+                    "INT",
+                    {"default": 3600, "min": 1, "max": 86400, "step": 60},
+                ),
+            },
+            "optional": {"image": ("IMAGE",)},
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("first_image", "result_json")
+    FUNCTION = "execute"
+    CATEGORY = "Kao/Cloud"
+
+    def execute(
+        self,
+        workflow_api_json: str,
+        provider: str = "auto",
+        input_filename: str = "kao_cloud_input.png",
+        timeout_seconds: int = 3600,
+        image=None,
+    ):
+        try:
+            workflow = json.loads(workflow_api_json)
+        except json.JSONDecodeError as exc:
+            raise KaoServiceError(f"Invalid API workflow JSON: {exc}") from exc
+        if not isinstance(workflow, dict) or not workflow:
+            raise KaoServiceError("API workflow JSON must be a non-empty object")
+        inputs = {input_filename: _image_to_b64(image)} if image is not None else {}
+        result = client.run_comfyui_workflow(
+            {
+                "workflow": workflow,
+                "inputs": inputs,
+                "provider": provider,
+                "timeout_seconds": int(timeout_seconds),
+            }
+        )
+        images = result.get("images") or []
+        first_image = _decode_image_tensor(images[0].get("data")) if images else None
+        if first_image is None:
+            import torch
+
+            first_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+        return (first_image, json.dumps(result, indent=2, sort_keys=True))
+
+
 class KaoImageTo3D:
     """Generate 3D mesh from a single image using the Kao service."""
 
     @classmethod
     def INPUT_TYPES(cls):
-        models = get_model_list(execution="auto", task="image-to-3d")
         return {
             "required": {"image": ("IMAGE",)},
             "optional": {
@@ -680,13 +1142,6 @@ class KaoImageTo3D:
                 "octree_resolution": (["256", "384", "512"], {"default": "256"}),
                 "remove_background": ("BOOLEAN", {"default": True}),
                 "generate_texture": ("BOOLEAN", {"default": False}),
-                "execution": (EXECUTION_TARGETS, {"default": "local"}),
-                "provider": (CLOUD_PROVIDERS, {"default": "auto"}),
-                "model_name": (
-                    models,
-                    {"default": _default_model(models, DEFAULT_IMAGE_TO_3D_MODEL)},
-                ),
-                "model": ("KAO_MODEL",),
             },
         }
 
@@ -698,18 +1153,14 @@ class KaoImageTo3D:
     def generate(
         self,
         image,
-        model: Optional[str] = None,
         steps: int = 30,
         guidance_scale: float = 5.0,
         seed: int = -1,
         octree_resolution: str = "256",
         remove_background: bool = True,
         generate_texture: bool = False,
-        execution: str = "local",
-        provider: str = "auto",
-        model_name: str = DEFAULT_IMAGE_TO_3D_MODEL,
     ):
-        selected_model = model or model_name
+        selected_model = DEFAULT_IMAGE_TO_3D_MODEL
         if selected_model == NO_RUNNABLE_MODELS:
             raise KaoServiceError(
                 "Kao reports no runnable image-to-mesh models for local or cloud execution"
@@ -725,8 +1176,8 @@ class KaoImageTo3D:
                 "remove_background": remove_background,
                 "generate_texture": generate_texture,
                 "output_format": "glb",
-                **_execution_payload(execution, provider),
-            }
+            },
+            progress_callback=_generation_progress_callback(),
         )
         mesh = _mesh_from_response(response)
         texture = _texture_from_glb(mesh.path) if generate_texture else None
@@ -754,8 +1205,6 @@ class KaoMultiViewTo3D:
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
                 "octree_resolution": (["256", "380", "512"], {"default": "380"}),
                 "remove_background": ("BOOLEAN", {"default": True}),
-                "execution": (EXECUTION_TARGETS, {"default": "local"}),
-                "provider": (CLOUD_PROVIDERS, {"default": "auto"}),
             },
         }
 
@@ -773,8 +1222,6 @@ class KaoMultiViewTo3D:
         seed: int = -1,
         octree_resolution: str = "380",
         remove_background: bool = True,
-        execution: str = "local",
-        provider: str = "auto",
     ):
         response = client.generate_job(
             {
@@ -789,8 +1236,8 @@ class KaoMultiViewTo3D:
                 "octree_resolution": int(octree_resolution),
                 "remove_background": remove_background,
                 "output_format": "glb",
-                **_execution_payload(execution, provider),
-            }
+            },
+            progress_callback=_generation_progress_callback(),
         )
         return (_mesh_from_response(response), response.get("seed", seed))
 
@@ -805,8 +1252,6 @@ class KaoImageToScene:
             "optional": {
                 "output_depth": ("BOOLEAN", {"default": True}),
                 "output_normals": ("BOOLEAN", {"default": False}),
-                "execution": (EXECUTION_TARGETS, {"default": "local"}),
-                "provider": (CLOUD_PROVIDERS, {"default": "auto"}),
             },
         }
 
@@ -820,8 +1265,6 @@ class KaoImageToScene:
         image,
         output_depth: bool = True,
         output_normals: bool = False,
-        execution: str = "local",
-        provider: str = "auto",
     ):
         output_types = ["pointcloud"]
         if output_depth:
@@ -833,8 +1276,8 @@ class KaoImageToScene:
                 "model": "world-mirror",
                 "image": _image_to_b64(image),
                 "output_types": output_types,
-                **_execution_payload(execution, provider),
-            }
+            },
+            progress_callback=_generation_progress_callback(),
         )
         pointcloud = (
             base64.b64decode(response["pointcloud"])
@@ -1150,8 +1593,6 @@ class KaoWorkspaceMaterialIntent:
 
 
 NODE_CLASS_MAPPINGS = {
-    "KaoLoadModel": KaoLoadModel,
-    "KaoSelectModel": KaoSelectModel,
     "KaoCloudStatus": KaoCloudStatus,
     "KaoImageTo3D": KaoImageTo3D,
     "KaoMultiViewTo3D": KaoMultiViewTo3D,
@@ -1166,8 +1607,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "KaoLoadModel": "Kao Load Model",
-    "KaoSelectModel": "Kao Select Model",
     "KaoCloudStatus": "Kao Cloud Status",
     "KaoImageTo3D": "Kao Image -> 3D",
     "KaoMultiViewTo3D": "Kao Multi-View -> 3D",

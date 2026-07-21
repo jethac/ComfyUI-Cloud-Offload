@@ -36,6 +36,51 @@ def test_generate_job_polls_until_result(monkeypatch):
     assert client.generate_job({"model": "hunyuan3d-2.1-turbo"}) == {"seed": 42}
 
 
+def test_comfyui_workflow_job_polls_cloud_result(monkeypatch):
+    nodes = load_nodes_module()
+    client = nodes.KaoClient(base_url="http://127.0.0.1:11501")
+    statuses = iter(
+        [
+            {"status": "queued", "result": None},
+            {"status": "running", "result": None},
+            {"status": "completed", "result": {"prompt_id": "prompt-1"}},
+        ]
+    )
+    monkeypatch.setattr(
+        client, "create_comfyui_job", lambda payload: {"job_id": "job-1"}
+    )
+    monkeypatch.setattr(client, "cloud_job_status", lambda job_id: next(statuses))
+    monkeypatch.setattr(nodes.time, "sleep", lambda seconds: None)
+
+    result = client.run_comfyui_workflow({"workflow": {"1": {}}})
+
+    assert result == {"prompt_id": "prompt-1"}
+
+
+def test_comfyui_workflow_node_forwards_api_prompt_and_image(monkeypatch):
+    nodes = load_nodes_module()
+    submitted = []
+    monkeypatch.setattr(nodes, "_image_to_b64", lambda image: "encoded-image")
+    monkeypatch.setattr(
+        nodes.client,
+        "run_comfyui_workflow",
+        lambda payload: submitted.append(payload) or {"outputs": {}, "images": []},
+    )
+
+    first_image, result_json = nodes.KaoCloudComfyUIWorkflow().execute(
+        '{"1":{"class_type":"LoadImage","inputs":{"image":"input.png"}}}',
+        provider="runpod",
+        input_filename="input.png",
+        timeout_seconds=900,
+        image=object(),
+    )
+
+    assert tuple(first_image.shape) == (1, 1, 1, 3)
+    assert json.loads(result_json)["outputs"] == {}
+    assert submitted[0]["inputs"] == {"input.png": "encoded-image"}
+    assert submitted[0]["provider"] == "runpod"
+
+
 def test_generate_job_tolerates_transient_status_timeout(monkeypatch):
     nodes = load_nodes_module()
     client = nodes.KaoClient(base_url="http://127.0.0.1:11501", timeout=60)
@@ -162,31 +207,14 @@ def test_generate_job_cancels_when_comfyui_interrupts(monkeypatch):
     assert cancelled == ["job-1"]
 
 
-def test_image_node_forwards_cloud_provider(monkeypatch):
+def test_image_node_has_no_node_level_cloud_routing(monkeypatch):
     nodes = load_nodes_module()
-    submitted = []
-    monkeypatch.setattr(nodes, "_image_to_b64", lambda image: "image-data")
-    monkeypatch.setattr(
-        nodes.client,
-        "generate_job",
-        lambda payload: submitted.append(payload)
-        or {
-            "mesh": base64.b64encode(b"mesh").decode("ascii"),
-            "seed": 7,
-            "stats": {},
-        },
-    )
+    inputs = nodes.KaoImageTo3D.INPUT_TYPES()
 
-    _, seed, _, _ = nodes.KaoImageTo3D().generate(
-        object(),
-        "hunyuan3d-2.1-turbo",
-        execution="cloud",
-        provider="runpod",
-    )
-
-    assert seed == 7
-    assert submitted[0]["execution"] == "cloud"
-    assert submitted[0]["provider"] == "runpod"
+    assert "execution" not in inputs["optional"]
+    assert "provider" not in inputs["optional"]
+    assert "model_name" not in inputs["optional"]
+    assert "model" not in inputs["optional"]
 
 
 def test_image_node_outputs_preview_file_and_optional_texture(monkeypatch):
@@ -195,7 +223,7 @@ def test_image_node_outputs_preview_file_and_optional_texture(monkeypatch):
     monkeypatch.setattr(
         nodes.client,
         "generate_job",
-        lambda payload: {
+        lambda payload, **kwargs: {
             "mesh": base64.b64encode(b"mesh").decode("ascii"),
             "seed": 7,
             "stats": {},
@@ -225,7 +253,7 @@ def test_image_node_rejects_missing_requested_texture(monkeypatch):
     monkeypatch.setattr(
         nodes.client,
         "generate_job",
-        lambda payload: {
+        lambda payload, **kwargs: {
             "mesh": base64.b64encode(b"mesh").decode("ascii"),
             "seed": 7,
             "stats": {},
@@ -276,38 +304,14 @@ def test_texture_output_reads_embedded_glb_base_color(tmp_path):
     assert texture[0, 0, 0].tolist() == [1.0, 0.0, 0.0]
 
 
-def test_image_node_has_default_model_dropdown_and_optional_override(monkeypatch):
-    nodes = load_nodes_module()
-    monkeypatch.setattr(
-        nodes,
-        "get_model_list",
-        lambda **kwargs: ["hunyuan3d-2.1-turbo", "triposr"],
-    )
-
-    inputs = nodes.KaoImageTo3D.INPUT_TYPES()
-
-    assert set(inputs["required"]) == {"image"}
-    assert inputs["optional"]["model_name"][1]["default"] == ("hunyuan3d-2.1-turbo")
-    assert inputs["optional"]["model"] == ("KAO_MODEL",)
-
-
-def test_image_node_falls_back_to_first_runnable_model(monkeypatch):
-    nodes = load_nodes_module()
-    monkeypatch.setattr(nodes, "get_model_list", lambda **kwargs: ["triposr"])
-
-    inputs = nodes.KaoImageTo3D.INPUT_TYPES()
-
-    assert inputs["optional"]["model_name"][1]["default"] == "triposr"
-
-
-def test_image_node_uses_dropdown_model_without_model_socket(monkeypatch):
+def test_image_node_uses_fixed_default_without_model_socket(monkeypatch):
     nodes = load_nodes_module()
     submitted = []
     monkeypatch.setattr(nodes, "_image_to_b64", lambda image: "image-data")
     monkeypatch.setattr(
         nodes.client,
         "generate_job",
-        lambda payload: submitted.append(payload)
+        lambda payload, **kwargs: submitted.append(payload)
         or {
             "mesh": base64.b64encode(b"mesh").decode("ascii"),
             "seed": 7,
@@ -315,45 +319,94 @@ def test_image_node_uses_dropdown_model_without_model_socket(monkeypatch):
         },
     )
 
-    nodes.KaoImageTo3D().generate(object(), model_name="triposr")
+    nodes.KaoImageTo3D().generate(object())
 
-    assert submitted[0]["model"] == "triposr"
+    assert submitted[0]["model"] == nodes.DEFAULT_IMAGE_TO_3D_MODEL
 
 
-def test_image_node_model_socket_overrides_dropdown(monkeypatch):
+def test_kao_partition_is_submitted_as_the_real_comfy_subgraph(monkeypatch):
     nodes = load_nodes_module()
     submitted = []
-    monkeypatch.setattr(nodes, "_image_to_b64", lambda image: "image-data")
     monkeypatch.setattr(
         nodes.client,
         "generate_job",
-        lambda payload: submitted.append(payload)
-        or {
-            "mesh": base64.b64encode(b"mesh").decode("ascii"),
-            "seed": 7,
-            "stats": {},
-        },
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not lower a Kao node to a model-specific job")
+        ),
     )
-
-    nodes.KaoImageTo3D().generate(
-        object(), model="triposr", model_name="hunyuan3d-2.1-turbo"
-    )
-
-    assert submitted[0]["model"] == "triposr"
-
-
-def test_select_model_does_not_load_local_runtime(monkeypatch):
-    nodes = load_nodes_module()
     monkeypatch.setattr(
         nodes.client,
-        "load",
-        lambda model: (_ for _ in ()).throw(AssertionError("should not load")),
+        "upload_partition_artifact",
+        lambda path: {"artifact_id": "a" * 64},
+    )
+    monkeypatch.setattr(
+        nodes.client,
+        "create_comfyui_partition_job",
+        lambda payload: submitted.append(payload) or {"job_id": "job-1"},
+    )
+    monkeypatch.setattr(
+        nodes.client,
+        "cloud_job_status",
+        lambda job_id: {"status": "completed", "result": {"output_artifacts": {}}},
+    )
+    monkeypatch.setattr(
+        nodes.client,
+        "cloud_job_events",
+        lambda job_id, after=0: {"events": []},
+    )
+    partition = {
+        "schema": "kao.partition.job.v1",
+        "partition_id": "part-1",
+        "runner": {"profile": "comfyui-omni"},
+        "workflow": {
+            "1": {
+                "class_type": "KaoImageTo3D",
+                "inputs": {
+                    "image": ["input", 0],
+                    "steps": 12,
+                },
+            },
+            "input": {
+                "class_type": "KaoPartitionInput",
+                "inputs": {"boundary_key": "input_0000"},
+            },
+            "output": {
+                "class_type": "KaoPartitionOutput",
+                "inputs": {"value": ["1", 0], "boundary_key": "output_0000"},
+            },
+        },
+        "outputs": [
+            {
+                "key": "output_0000",
+                "source_node": "1",
+                "source_output": 0,
+                "type": "KAO_MESH",
+            }
+        ],
+    }
+
+    result = nodes.client.run_comfyui_partition(
+        partition,
+        {"input_0000": 7},
+        provider="runpod",
     )
 
-    assert nodes.KaoSelectModel().select("world-mirror") == ("world-mirror",)
-    assert nodes.KaoLoadModel().load("world-mirror", load_locally=False) == (
-        "world-mirror",
-    )
+    assert result["job_id"] == "job-1"
+    assert submitted[0]["provider"] == "runpod"
+    assert submitted[0]["partition"]["workflow"]["1"]["class_type"] == "KaoImageTo3D"
+    assert submitted[0]["partition"]["runner"]["profile"] == "comfyui-omni"
+
+
+def test_only_cloud_offload_exposes_cloud_execution_nodes():
+    nodes = load_nodes_module()
+
+    assert "KaoSelectModel" not in nodes.NODE_CLASS_MAPPINGS
+    assert "KaoLoadModel" not in nodes.NODE_CLASS_MAPPINGS
+    assert "KaoCloudComfyUIWorkflow" not in nodes.NODE_CLASS_MAPPINGS
+    for node_type in (nodes.KaoMultiViewTo3D, nodes.KaoImageToScene):
+        optional = node_type.INPUT_TYPES()["optional"]
+        assert "execution" not in optional
+        assert "provider" not in optional
 
 
 def test_cloud_status_node_returns_provider_balances(monkeypatch):
