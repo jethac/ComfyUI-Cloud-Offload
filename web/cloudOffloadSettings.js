@@ -465,6 +465,16 @@ export function openProviderManager() {
     "width:min(560px,calc(100vw - 32px));max-height:82vh;overflow:auto;padding:20px;border:1px solid #5368d8;border-radius:10px;background:#1b1d27;color:#eee;font:14px sans-serif;box-shadow:0 18px 60px #000a"
   panel.innerHTML = `<h2 style="margin:0 0 4px;font-size:18px">Cloud Offload providers</h2>
     <div style="opacity:.65;margin-bottom:12px;line-height:1.4">Credentials are sent to the coordinator and stored outside ComfyUI's settings file. Install additional providers as connector plugins.</div>
+    <fieldset style="border:1px solid #3a3f55;border-radius:8px;padding:12px;margin:0 0 12px">
+      <legend style="padding:0 6px;opacity:.85">Coordinator policy</legend>
+      ${field("Max hourly rate (USD)", "The dispatcher never rents a GPU above this. Applies to every box.")}
+        <input data-max-rate type="number" min="0" step="0.05" style="width:120px" />
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <button type="button" data-action="save-policy">Save</button>
+        <span data-policy-result style="font-size:12px;opacity:.8"></span>
+      </div>
+    </fieldset>
     <div data-list>Loading…</div>
     <div data-specs></div>
     <div style="display:flex;justify-content:flex-end;margin-top:16px"><button type="button" data-action="close">Close</button></div>`
@@ -475,6 +485,43 @@ export function openProviderManager() {
   panel.querySelector('[data-action="close"]').addEventListener("click", close)
   overlay.addEventListener("pointerdown", (event) => {
     if (event.target === overlay) close()
+  })
+
+  // Coordinator policy: the hourly-rate ceiling is server state, not a
+  // per-browser setting, so it is read from and written to the coordinator.
+  const rateInput = panel.querySelector("[data-max-rate]")
+  const policyResult = panel.querySelector("[data-policy-result]")
+  api.fetchApi("/cloud_offload/config")
+    .then((response) => response.json())
+    .then((payload) => {
+      const cloud = payload.cloud || payload
+      if (typeof cloud.max_hourly_rate === "number") rateInput.value = cloud.max_hourly_rate
+    })
+    .catch(() => {
+      policyResult.textContent = "Coordinator unreachable"
+      policyResult.style.color = "#d8747f"
+    })
+  panel.querySelector('[data-action="save-policy"]').addEventListener("click", async () => {
+    const value = Number(rateInput.value)
+    if (!Number.isFinite(value) || value <= 0) {
+      policyResult.textContent = "Enter a positive rate"
+      policyResult.style.color = "#d8747f"
+      return
+    }
+    try {
+      const response = await api.fetchApi("/cloud_offload/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_hourly_rate: value }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`)
+      policyResult.textContent = "Saved"
+      policyResult.style.color = "#5fbf7f"
+    } catch (error) {
+      policyResult.textContent = String(error.message || error)
+      policyResult.style.color = "#d8747f"
+    }
   })
 
   const list = panel.querySelector("[data-list]")

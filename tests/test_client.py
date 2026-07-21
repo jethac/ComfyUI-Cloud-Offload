@@ -448,3 +448,27 @@ def test_http_error_surfaces_structured_problem_lists(monkeypatch):
     message = str(excinfo.value)
     assert "Provider spec 'acme' is invalid" in message
     assert "'base_url' is required; missing 'offers'" in message
+
+
+# === Coordinator config (UI-editable policy) ===
+
+def test_config_client_reads_and_patches(monkeypatch):
+    calls = []
+
+    def fake_json(self, method, path, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        if method == "GET":
+            return {"cloud": {"max_hourly_rate": 1.0, "enabled": True}}
+        return {"cloud": {"max_hourly_rate": payload["max_hourly_rate"]}}
+
+    monkeypatch.setattr(client_module.CloudOffloadClient, "_json", fake_json)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    assert instance.get_config()["cloud"]["max_hourly_rate"] == 1.0
+    result = instance.update_config({"max_hourly_rate": 1.5})
+
+    assert result["cloud"]["max_hourly_rate"] == 1.5
+    assert calls == [
+        ("GET", "/api/config", None),
+        ("POST", "/api/config", {"max_hourly_rate": 1.5}),
+    ]

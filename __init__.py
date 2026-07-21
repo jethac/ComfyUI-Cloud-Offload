@@ -81,6 +81,16 @@ def _register_routes() -> None:
             return web.json_response({"error": str(exc)}, status=502)
         return web.json_response(payload)
 
+    @PromptServer.instance.routes.get("/cloud_offload/config")
+    async def cloud_offload_get_config(request):
+        return await _proxy(client.get_config)
+
+    @PromptServer.instance.routes.post("/cloud_offload/config")
+    async def cloud_offload_update_config(request):
+        # Coordinator policy (e.g. the hourly-rate ceiling), not per-browser
+        # settings. The coordinator rejects secret fields itself.
+        return await _proxy(client.update_config, await _read_body(request))
+
     # Declarative provider specs. Registered before the generic
     # ``{provider}/{action}`` route below, which would otherwise swallow
     # ``POST /cloud_offload/providers/specs/validate`` as provider="specs".

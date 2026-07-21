@@ -275,6 +275,18 @@ class CloudOffloadClient:
     def providers(self) -> Dict[str, Any]:
         return self._json("GET", "/api/providers", timeout=15)
 
+    def get_config(self) -> Dict[str, Any]:
+        """Read non-secret coordinator configuration (never includes keys)."""
+        return self._json("GET", "/api/config", timeout=15)
+
+    def update_config(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Patch non-secret coordinator policy (e.g. the hourly-rate ceiling).
+
+        The coordinator refuses secret fields; credentials go through
+        ``provider_action``.
+        """
+        return self._json("POST", "/api/config", payload=updates, timeout=15)
+
     def provider_action(
         self, provider: str, action: str, payload: Dict[str, Any] | None = None
     ) -> Dict[str, Any]:
