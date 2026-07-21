@@ -1,4 +1,4 @@
-"""ComfyUI-Kao: Kao service nodes for ComfyUI."""
+"""ComfyUI-Cloud-Offload: cloud partition and legacy Kao service nodes."""
 
 if __package__:
     from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS

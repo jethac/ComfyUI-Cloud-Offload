@@ -1,6 +1,9 @@
-# ComfyUI-Kao
+# ComfyUI-Cloud-Offload
 
-Kao nodes for ComfyUI. 3D generation powered by [Kao](https://github.com/jethac/kao).
+Run selected ComfyUI nodes on rented cloud GPUs as a visible, editable
+**Cloud Offload** box. Formerly ComfyUI-Kao: the pack still includes legacy
+Kao 3D generation and workspace nodes while they are decomposed into
+ordinary ComfyUI nodes.
 
 ## Installation
 
@@ -13,9 +16,9 @@ Kao nodes for ComfyUI. 3D generation powered by [Kao](https://github.com/jethac/
 2. Clone/symlink to custom_nodes:
    ```bash
    cd ComfyUI/custom_nodes
-   git clone http://truenas-scale:8088/jethac/comfyui-kao.git ComfyUI-Kao
+   git clone <remote-url> ComfyUI-Cloud-Offload
    # or symlink for dev:
-   # mklink /D ComfyUI-Kao B:\lab\ComfyUI-Kao
+   # mklink /J ComfyUI-Cloud-Offload B:\lab\ComfyUI-Cloud-Offload
    ```
 
 3. Restart ComfyUI.

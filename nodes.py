@@ -1,5 +1,5 @@
 """
-ComfyUI-Kao: Kao service nodes for ComfyUI.
+ComfyUI-Cloud-Offload: cloud partition and legacy Kao service nodes.
 """
 
 from __future__ import annotations
