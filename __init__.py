@@ -34,10 +34,13 @@ else:
     )
 
 def _register_routes() -> None:
-    """Expose a same-origin provider list to the Cloud Offload box dialog.
+    """Expose the coordinator's provider surface same-origin to the browser.
 
     The browser cannot call the coordinator directly (different origin, and the
-    bearer token stays server-side), so ComfyUI proxies the discovery route.
+    bearer token stays server-side), so ComfyUI proxies provider discovery,
+    per-connector administration, and declarative provider spec authoring.
+    Nothing passing through here is persisted in ComfyUI: credentials and dry-run
+    probe keys are forwarded to the coordinator and dropped.
     """
     try:
         from server import PromptServer
@@ -62,6 +65,63 @@ def _register_routes() -> None:
             )
         return web.json_response(payload)
 
+    async def _read_body(request):
+        try:
+            return await request.json() if request.can_read_body else {}
+        except Exception:
+            return {}
+
+    async def _proxy(call, *args):
+        """Run one coordinator call off the event loop, as a JSON response."""
+        import asyncio
+
+        try:
+            payload = await asyncio.to_thread(call, *args)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        return web.json_response(payload)
+
+    # Declarative provider specs. Registered before the generic
+    # ``{provider}/{action}`` route below, which would otherwise swallow
+    # ``POST /cloud_offload/providers/specs/validate`` as provider="specs".
+    #
+    # A spec holds no credentials by construction, so these bodies are ordinary
+    # configuration. The one exception is the dry-run probe key, which is passed
+    # through for that single request and never persisted on either side.
+
+    @PromptServer.instance.routes.get("/cloud_offload/providers/specs")
+    async def cloud_offload_list_specs(request):
+        return await _proxy(client.provider_specs)
+
+    @PromptServer.instance.routes.post("/cloud_offload/providers/specs/validate")
+    async def cloud_offload_validate_spec(request):
+        body = await _read_body(request)
+        return await _proxy(client.validate_provider_spec, body.get("spec", body))
+
+    @PromptServer.instance.routes.post("/cloud_offload/providers/specs/dry-run")
+    async def cloud_offload_dry_run_spec(request):
+        body = await _read_body(request)
+        return await _proxy(
+            client.dry_run_provider_spec, body.get("spec", body), body.get("api_key")
+        )
+
+    @PromptServer.instance.routes.get("/cloud_offload/providers/specs/{name}")
+    async def cloud_offload_get_spec(request):
+        return await _proxy(client.provider_spec, request.match_info["name"])
+
+    @PromptServer.instance.routes.put("/cloud_offload/providers/specs/{name}")
+    async def cloud_offload_put_spec(request):
+        body = await _read_body(request)
+        return await _proxy(
+            client.save_provider_spec,
+            request.match_info["name"],
+            body.get("spec", body),
+        )
+
+    @PromptServer.instance.routes.delete("/cloud_offload/providers/specs/{name}")
+    async def cloud_offload_delete_spec(request):
+        return await _proxy(client.delete_provider_spec, request.match_info["name"])
+
     @PromptServer.instance.routes.post(
         "/cloud_offload/providers/{provider}/{action}"
     )
@@ -71,23 +131,12 @@ def _register_routes() -> None:
         Credentials pass straight through to the coordinator, which stores them
         outside ComfyUI. They are never written to comfy.settings.json.
         """
-        import asyncio
-
         provider = request.match_info["provider"]
         action = request.match_info["action"]
         if action not in {"credentials", "settings", "test"}:
             return web.json_response({"error": "Unsupported action"}, status=404)
-        try:
-            body = await request.json() if request.can_read_body else {}
-        except Exception:
-            body = {}
-        try:
-            payload = await asyncio.to_thread(
-                client.provider_action, provider, action, body
-            )
-        except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=502)
-        return web.json_response(payload)
+        body = await _read_body(request)
+        return await _proxy(client.provider_action, provider, action, body)
 
 
 _register_routes()

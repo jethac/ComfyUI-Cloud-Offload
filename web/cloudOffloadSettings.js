@@ -17,6 +17,69 @@ export const SETTING_TIMEOUT = "CloudOffload.Runner.TimeoutMinutes"
 export const SETTING_KEEP_WARM = "CloudOffload.Runner.KeepWarm"
 
 const PROVIDERS_ROUTE = "/cloud_offload/providers"
+const SPECS_ROUTE = `${PROVIDERS_ROUTE}/specs`
+
+// The authoring form prefills from the Vast.ai spec Cloud Offload ships and
+// actually runs on, fetched live from GET /providers/specs/vast.ai so it cannot
+// drift from the file. That spec exercises every primitive at once: a
+// JSON-encoded filter query, an MB->GB unit conversion, a templated path, body
+// fields that vanish when empty, readiness polling after launch, and
+// select-from-collection for a provider with no fetch-by-id route.
+//
+// Stripped from the prefill: keys the form's own fields own, plus the ones that
+// only make sense for the provider being copied from. The engine derives a
+// sensible settings_schema when a spec omits it.
+const SPEC_PREFILL_OMIT = [
+  "spec_version",
+  "name",
+  "aliases",
+  "display_name",
+  "base_url",
+  "base_url_config_field",
+  "auth",
+  "settings_schema",
+  "_source",
+]
+
+// Used only when the coordinator cannot serve the real spec, so the form is
+// never an empty box. Deliberately minimal: a skeleton that is honest about
+// being one beats a large copy that silently rots.
+const FALLBACK_SKELETON = {
+  endpoints: {
+    offers: {
+      method: "GET",
+      path: "offers",
+      items: "$.data",
+      map: {
+        id: { path: "$.id", type: "str", required: true },
+        gpu_type: { path: "$.gpu.name", default: "unknown" },
+        gpu_ram_gb: { path: "$.gpu.vram_mb", unit: "MB->GB", default: 0 },
+        hourly_rate: { path: "$.price_per_hour", default: 0 },
+      },
+    },
+  },
+}
+
+async function specSkeleton() {
+  try {
+    const payload = await specRequest("GET", "/vast.ai")
+    const spec = payload?.spec
+    if (!spec?.endpoints) return FALLBACK_SKELETON
+    return Object.fromEntries(
+      Object.entries(spec).filter(([key]) => !SPEC_PREFILL_OMIT.includes(key))
+    )
+  } catch {
+    return FALLBACK_SKELETON
+  }
+}
+
+function esc(value) {
+  return String(value ?? "").replace(
+    /[&<>"']/g,
+    (character) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]
+  )
+}
 
 export function settingValue(id, fallback) {
   try {
@@ -45,6 +108,28 @@ async function providerRequest(provider, action, body) {
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(payload?.error || payload?.detail || `HTTP ${response.status}`)
   return payload
+}
+
+async function specRequest(method, path = "", body) {
+  const response = await api.fetchApi(`${SPECS_ROUTE}${path}`, {
+    method,
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+  })
+  const payload = await response.json().catch(() => ({}))
+  // A failed dry run is a 200 carrying {"ok": false, "error": ...}: that is a
+  // result about the provider, not a transport failure, so only the status
+  // decides whether this throws.
+  if (!response.ok) throw new Error(payload?.error || payload?.detail || `HTTP ${response.status}`)
+  return payload
+}
+
+export async function fetchProviderSpecs() {
+  return await specRequest("GET")
 }
 
 // Provider options are discovered at load time so plugin-registered connectors
@@ -112,6 +197,265 @@ function providerCard(entry) {
     </section>`
 }
 
+// Labels for the auth types the coordinator reports. The list of types is the
+// engine's; this only makes them readable, and an unknown one still renders.
+const AUTH_TYPE_LABELS = {
+  bearer: "Bearer token (Authorization: Bearer <key>)",
+  header: "Custom header",
+  query: "Query parameter",
+  basic: "HTTP Basic",
+  none: "No credential",
+}
+
+function specForm(authTypes, skeleton) {
+  return `
+    <section data-spec-form style="border:1px dashed #5368d8;border-radius:8px;padding:12px;margin:10px 0">
+      <strong>Add a REST provider</strong>
+      <div style="opacity:.7;font-size:12px;margin:6px 0 2px;line-height:1.45">
+        This form writes a <em>declarative spec</em>, which covers providers whose API is
+        JSON over REST with bearer, header, query-parameter or HTTP Basic auth.
+        <b>GraphQL APIs, request signing (AWS SigV4) and multi-step provisioning cannot be
+        expressed here</b> — those need a connector plugin: a Python file in
+        <code>~/.cloud-offload/connectors/</code>. RunPod is coded for exactly that reason.
+      </div>
+      ${field("Name", "Lowercase identifier, also the file name (e.g. acme)")}
+        <input data-spec="name" type="text" placeholder="acme" autocomplete="off" />
+      </label>
+      ${field("Display name")}
+        <input data-spec="display_name" type="text" placeholder="Acme GPU" autocomplete="off" />
+      </label>
+      ${field("API base URL")}
+        <input data-spec="base_url" type="text" placeholder="https://api.acme.dev/v1" autocomplete="off" />
+      </label>
+      ${field("Auth type")}
+        <select data-spec="auth_type">
+          ${authTypes
+            .map(
+              (value) =>
+                `<option value="${esc(value)}">${esc(AUTH_TYPE_LABELS[value] || value)}</option>`
+            )
+            .join("")}
+        </select>
+      </label>
+      ${field("Auth header / parameter name", "Only for the header and query auth types")}
+        <input data-spec="auth_name" type="text" placeholder="X-Api-Key" autocomplete="off" />
+      </label>
+      ${field(
+        "Endpoints and field mapping (JSON)",
+        "Prefilled from the Vast.ai spec Cloud Offload ships and runs on. Edit the paths and map entries for your provider."
+      )}
+        <textarea data-spec="json" rows="14" spellcheck="false" style="font:12px ui-monospace,Consolas,monospace;resize:vertical">${esc(
+          JSON.stringify(skeleton, null, 2)
+        )}</textarea>
+      </label>
+      ${field(
+        "API key for dry run",
+        "Used for this one read-only probe. Not saved here or in ComfyUI. Blank reuses the key already stored for this provider name."
+      )}
+        <input data-spec="api_key" type="password" autocomplete="off" />
+      </label>
+      <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
+        <button type="button" data-action="validate">Validate</button>
+        <button type="button" data-action="dry-run">Dry run</button>
+        <button type="button" data-action="save-spec">Save</button>
+        <span data-spec-result style="font-size:12px;opacity:.85"></span>
+      </div>
+      <pre data-spec-detail style="display:none;white-space:pre-wrap;word-break:break-word;font:12px ui-monospace,Consolas,monospace;background:#12141c;border-radius:6px;padding:8px;margin:10px 0 0;max-height:220px;overflow:auto"></pre>
+    </section>`
+}
+
+function specCard(entry) {
+  const state = entry.valid
+    ? `<span style="color:#5fbf7f">valid${entry.registered ? " · registered" : ""}</span>`
+    : `<span style="color:#d8747f">invalid</span>`
+  const problems = entry.valid
+    ? ""
+    : `<ul style="margin:6px 0 0 18px;padding:0;font-size:12px;color:#d8a24a">${entry.problems
+        .map((problem) => `<li>${esc(problem)}</li>`)
+        .join("")}</ul>`
+  return `
+    <div data-spec-name="${esc(entry.name)}" style="border:1px solid #3a3f55;border-radius:8px;padding:10px;margin:8px 0">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span><strong>${esc(entry.display_name || entry.name)}</strong> <span style="opacity:.6">${esc(entry.name)}</span></span>
+        <span style="font-size:12px">${state}</span>
+      </div>
+      <div style="opacity:.55;font-size:11px;margin-top:4px;word-break:break-all">${esc(entry.source || "")}</div>
+      ${problems}
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+        <button type="button" data-action="delete-spec">Delete</button>
+        <span data-spec-row-result style="font-size:12px;opacity:.8"></span>
+      </div>
+    </div>`
+}
+
+async function mountSpecs(container) {
+  const say = (element, message, ok = true) => {
+    element.textContent = message
+    element.style.color = ok ? "#5fbf7f" : "#d8747f"
+  }
+
+  // Both requests are independent, so issue them together.
+  const [initial, skeleton] = await Promise.all([
+    fetchProviderSpecs().catch((error) => ({ error })),
+    specSkeleton(),
+  ])
+
+  // The form is mounted once and the list refreshes underneath it, so saving a
+  // spec never wipes the draft the user is still editing.
+  container.innerHTML = `
+    <h3 style="margin:18px 0 4px;font-size:15px">Declarative provider specs</h3>
+    <div data-spec-dir style="opacity:.6;font-size:12px;margin-bottom:6px;word-break:break-all"></div>
+    <div data-spec-list style="opacity:.7;font-size:13px">Loading…</div>
+    ${specForm(initial.auth_types || Object.keys(AUTH_TYPE_LABELS), skeleton)}`
+
+  const listing = container.querySelector("[data-spec-list]")
+  const directory = container.querySelector("[data-spec-dir]")
+  const form = container.querySelector("[data-spec-form]")
+  const result = form.querySelector("[data-spec-result]")
+  const detail = form.querySelector("[data-spec-detail]")
+  const read = (key) => form.querySelector(`[data-spec="${key}"]`).value.trim()
+  const show = (text) => {
+    detail.style.display = text ? "block" : "none"
+    detail.textContent = text || ""
+  }
+
+  const render = (payload) => {
+    const specs = payload.specs || []
+    directory.textContent = payload.directory || ""
+    listing.innerHTML = specs.length
+      ? specs.map(specCard).join("")
+      : "No user specs yet."
+  }
+
+  const refresh = () =>
+    fetchProviderSpecs()
+      .then(render)
+      .catch((error) => {
+        listing.innerHTML = `<span style="color:#d8747f">Provider specs unavailable: ${esc(
+          error.message
+        )}</span>`
+      })
+
+  // Delegated, so it is bound once and keeps working across re-renders.
+  listing.addEventListener("click", async (event) => {
+    if (!event.target.matches('[data-action="delete-spec"]')) return
+    const row = event.target.closest("[data-spec-name]")
+    const name = row.dataset.specName
+    try {
+      const deleted = await specRequest("DELETE", `/${encodeURIComponent(name)}`)
+      await refresh()
+      if (deleted.restart_required) {
+        say(result, `Deleted ${name} — restart the coordinator to unregister it`)
+      }
+    } catch (error) {
+      say(row.querySelector("[data-spec-row-result]"), String(error.message || error), false)
+    }
+  })
+
+  // The form owns the identity fields; the textarea is the rest of the spec
+  // verbatim, so a user can express anything the engine understands without the
+  // form having to grow a control for it.
+  const compose = () => {
+    const extra = JSON.parse(form.querySelector('[data-spec="json"]').value || "{}")
+    const authType = read("auth_type")
+    const authName = read("auth_name")
+    return {
+      spec_version: 1,
+      name: read("name").toLowerCase(),
+      display_name: read("display_name") || read("name"),
+      base_url: read("base_url"),
+      auth: {
+        type: authType,
+        ...(authName && (authType === "header" || authType === "query")
+          ? { name: authName }
+          : {}),
+      },
+      ...extra,
+    }
+  }
+
+  const withSpec = (handler) => async () => {
+    show("")
+    let spec
+    try {
+      spec = compose()
+    } catch (error) {
+      say(result, `Endpoint JSON is not valid: ${error.message}`, false)
+      return
+    }
+    if (!spec.name) {
+      say(result, "A name is required", false)
+      return
+    }
+    try {
+      await handler(spec)
+    } catch (error) {
+      say(result, String(error.message || error), false)
+    }
+  }
+
+  form.querySelector('[data-action="validate"]').addEventListener(
+    "click",
+    withSpec(async (spec) => {
+      const payload = await specRequest("POST", "/validate", { spec })
+      if (payload.valid) {
+        say(result, "Valid")
+        return
+      }
+      say(result, `${payload.problems.length} problem(s)`, false)
+      show(payload.problems.join("\n"))
+    })
+  )
+
+  form.querySelector('[data-action="dry-run"]').addEventListener(
+    "click",
+    withSpec(async (spec) => {
+      say(result, "Probing offers…")
+      const payload = await specRequest("POST", "/dry-run", {
+        spec,
+        api_key: read("api_key") || undefined,
+      })
+      if (!payload.ok) {
+        say(result, payload.error || "Dry run failed", false)
+        show((payload.problems || []).join("\n"))
+        return
+      }
+      say(result, `${payload.offer_count} offer(s)`)
+      show(
+        payload.sample
+          ? `Mapped sample:\n${JSON.stringify(payload.sample, null, 2)}`
+          : "The request succeeded but the provider returned no offers, so there is nothing to map."
+      )
+    })
+  )
+
+  form.querySelector('[data-action="save-spec"]').addEventListener(
+    "click",
+    withSpec(async (spec) => {
+      const payload = await specRequest("PUT", `/${encodeURIComponent(spec.name)}`, {
+        spec,
+      })
+      await refresh()
+      say(
+        result,
+        payload.registered
+          ? `Saved and registered as ${payload.name}`
+          : `Saved to ${payload.source} (not registered)`
+      )
+      if (payload.errors?.length) show(payload.errors.join("\n"))
+    })
+  )
+
+  // The listing was already fetched above; render it rather than asking again.
+  if (initial.error) {
+    listing.innerHTML = `<span style="color:#d8747f">Provider specs unavailable: ${esc(
+      initial.error.message
+    )}</span>`
+  } else {
+    render(initial)
+  }
+}
+
 export function openProviderManager() {
   const overlay = document.createElement("div")
   overlay.style.cssText =
@@ -122,6 +466,7 @@ export function openProviderManager() {
   panel.innerHTML = `<h2 style="margin:0 0 4px;font-size:18px">Cloud Offload providers</h2>
     <div style="opacity:.65;margin-bottom:12px;line-height:1.4">Credentials are sent to the coordinator and stored outside ComfyUI's settings file. Install additional providers as connector plugins.</div>
     <div data-list>Loading…</div>
+    <div data-specs></div>
     <div style="display:flex;justify-content:flex-end;margin-top:16px"><button type="button" data-action="close">Close</button></div>`
   overlay.appendChild(panel)
   document.body.appendChild(panel.ownerDocument === document ? overlay : overlay)
@@ -188,6 +533,8 @@ export function openProviderManager() {
     .catch((error) => {
       list.innerHTML = `<div style="color:#d8747f">Coordinator unreachable: ${error.message}</div>`
     })
+
+  mountSpecs(panel.querySelector("[data-specs]"))
 }
 
 app.registerExtension({

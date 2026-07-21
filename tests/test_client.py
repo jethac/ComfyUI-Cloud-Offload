@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 
@@ -369,3 +370,81 @@ def test_provider_names_fall_back_when_coordinator_unreachable(monkeypatch):
 
     # Node definitions are built at import time; discovery failure must not break them.
     assert instance.provider_names() == client_module.FALLBACK_PROVIDERS
+
+
+# === Declarative provider specs ===
+
+def test_provider_spec_methods_map_to_coordinator_routes(monkeypatch):
+    calls = []
+
+    def fake_json(self, method, path, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        return {"ok": True}
+
+    monkeypatch.setattr(client_module.CloudOffloadClient, "_json", fake_json)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+    spec = {"name": "acme", "base_url": "https://api.acme.dev/v1"}
+
+    instance.provider_specs()
+    instance.provider_spec("acme")
+    instance.save_provider_spec("acme", spec)
+    instance.delete_provider_spec("acme")
+    instance.validate_provider_spec(spec)
+    instance.dry_run_provider_spec(spec, api_key="probe-only")
+    instance.dry_run_provider_spec(spec)
+
+    assert calls == [
+        ("GET", "/api/providers/specs", None),
+        ("GET", "/api/providers/specs/acme", None),
+        ("PUT", "/api/providers/specs/acme", spec),
+        ("DELETE", "/api/providers/specs/acme", None),
+        ("POST", "/api/providers/specs/validate", spec),
+        ("POST", "/api/providers/specs/dry-run", {"spec": spec, "api_key": "probe-only"}),
+        # No key supplied means "use whatever the coordinator already has".
+        ("POST", "/api/providers/specs/dry-run", {"spec": spec}),
+    ]
+
+
+def test_provider_spec_names_are_url_encoded(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        client_module.CloudOffloadClient,
+        "_json",
+        lambda self, method, path, **kwargs: calls.append(path) or {},
+    )
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    instance.provider_spec("../../etc/passwd")
+
+    # The coordinator sanitizes too, but a client must not send a path it did
+    # not mean to address.
+    assert calls == ["/api/providers/specs/..%2F..%2Fetc%2Fpasswd"]
+
+
+def test_http_error_surfaces_structured_problem_lists(monkeypatch):
+    import urllib.error
+
+    body = json.dumps(
+        {
+            "error": {
+                "code": "cloud_offload.invalid_provider_spec",
+                "message": "Provider spec 'acme' is invalid",
+                "details": {"problems": ["'base_url' is required", "missing 'offers'"]},
+            }
+        }
+    ).encode("utf-8")
+
+    def boom(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url, 400, "Bad Request", {}, io.BytesIO(body)
+        )
+
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", boom)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    with pytest.raises(client_module.CloudOffloadError) as excinfo:
+        instance.validate_provider_spec({"name": "acme"})
+
+    message = str(excinfo.value)
+    assert "Provider spec 'acme' is invalid" in message
+    assert "'base_url' is required; missing 'offers'" in message

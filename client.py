@@ -247,9 +247,14 @@ class CloudOffloadClient:
             detail = exc.reason
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
-                detail = payload.get("error", {}).get("message") or payload.get(
-                    "detail", detail
-                )
+                error = payload.get("error", {})
+                detail = error.get("message") or payload.get("detail", detail)
+                # The coordinator puts actionable lists (provider spec problems,
+                # for one) in details rather than the message; carry them across
+                # so the caller can show what actually went wrong.
+                problems = (error.get("details") or {}).get("problems")
+                if isinstance(problems, list) and problems:
+                    detail = f"{detail}: " + "; ".join(str(item) for item in problems)
             except Exception:
                 pass
             raise CloudOffloadError(f"Cloud Offload coordinator error: {detail}") from exc
@@ -281,6 +286,55 @@ class CloudOffloadClient:
             f"/api/providers/{urllib.parse.quote(provider)}/{action}",
             payload=payload or {},
             timeout=30,
+        )
+
+    # -- Declarative provider specs --------------------------------------
+
+    def provider_specs(self) -> Dict[str, Any]:
+        """List the declarative provider specs the coordinator has on disk."""
+        return self._json("GET", "/api/providers/specs", timeout=15)
+
+    def provider_spec(self, name: str) -> Dict[str, Any]:
+        """Fetch one provider spec by name."""
+        return self._json(
+            "GET", f"/api/providers/specs/{urllib.parse.quote(name, safe='')}", timeout=15
+        )
+
+    def save_provider_spec(self, name: str, spec: Dict[str, Any]) -> Dict[str, Any]:
+        """Create or replace a provider spec. The coordinator validates first."""
+        return self._json(
+            "PUT",
+            f"/api/providers/specs/{urllib.parse.quote(name, safe='')}",
+            payload=spec,
+            timeout=30,
+        )
+
+    def delete_provider_spec(self, name: str) -> Dict[str, Any]:
+        """Delete a user provider spec."""
+        return self._json(
+            "DELETE", f"/api/providers/specs/{urllib.parse.quote(name, safe='')}", timeout=15
+        )
+
+    def validate_provider_spec(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+        """Check a spec without writing it or contacting the provider."""
+        return self._json(
+            "POST", "/api/providers/specs/validate", payload=spec, timeout=15
+        )
+
+    def dry_run_provider_spec(
+        self, spec: Dict[str, Any], api_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Probe a spec's offers endpoint before saving it.
+
+        Read-only on the provider's side. ``api_key`` is passed through for that
+        one probe; the coordinator neither stores nor echoes it, and ComfyUI
+        never writes it anywhere.
+        """
+        payload: Dict[str, Any] = {"spec": spec}
+        if api_key:
+            payload["api_key"] = api_key
+        return self._json(
+            "POST", "/api/providers/specs/dry-run", payload=payload, timeout=60
         )
 
     def provider_names(self) -> list[str]:
