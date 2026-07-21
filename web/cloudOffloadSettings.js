@@ -470,6 +470,12 @@ export function openProviderManager() {
       ${field("Max hourly rate (USD)", "The dispatcher never rents a GPU above this. Applies to every box.")}
         <input data-max-rate type="number" min="0" step="0.05" style="width:120px" />
       </label>
+      ${field("Public ingress", "How a rented worker reaches this coordinator. Auto opens a Cloudflare tunnel so you never paste a URL; it exposes the coordinator publicly, protected by the required access token.")}
+        <select data-ingress>
+          <option value="none">Manual — I set a coordinator URL myself</option>
+          <option value="cloudflared">Automatic — open a Cloudflare tunnel</option>
+        </select>
+      </label>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
         <button type="button" data-action="save-policy">Save</button>
         <span data-policy-result style="font-size:12px;opacity:.8"></span>
@@ -490,12 +496,14 @@ export function openProviderManager() {
   // Coordinator policy: the hourly-rate ceiling is server state, not a
   // per-browser setting, so it is read from and written to the coordinator.
   const rateInput = panel.querySelector("[data-max-rate]")
+  const ingressSelect = panel.querySelector("[data-ingress]")
   const policyResult = panel.querySelector("[data-policy-result]")
   api.fetchApi("/cloud_offload/config")
     .then((response) => response.json())
     .then((payload) => {
       const cloud = payload.cloud || payload
       if (typeof cloud.max_hourly_rate === "number") rateInput.value = cloud.max_hourly_rate
+      if (cloud.ingress) ingressSelect.value = cloud.ingress
     })
     .catch(() => {
       policyResult.textContent = "Coordinator unreachable"
@@ -512,7 +520,7 @@ export function openProviderManager() {
       const response = await api.fetchApi("/cloud_offload/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_hourly_rate: value }),
+        body: JSON.stringify({ max_hourly_rate: value, ingress: ingressSelect.value }),
       })
       const payload = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`)
