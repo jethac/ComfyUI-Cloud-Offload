@@ -450,6 +450,41 @@ def test_http_error_surfaces_structured_problem_lists(monkeypatch):
     assert "'base_url' is required; missing 'offers'" in message
 
 
+# === Hugging Face token (write-only, proxied like provider credentials) ===
+
+def test_provider_action_posts_the_huggingface_token(monkeypatch):
+    calls = []
+
+    def fake_json(self, method, path, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        return {"provider": "huggingface", "configured": True}
+
+    monkeypatch.setattr(client_module.CloudOffloadClient, "_json", fake_json)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    payload = instance.provider_action(
+        "huggingface", "credentials", {"api_key": "hf-token"}
+    )
+
+    # The coordinator answers with a boolean only; the token never echoes back.
+    assert payload == {"provider": "huggingface", "configured": True}
+    assert calls == [
+        ("POST", "/api/providers/huggingface/credentials", {"api_key": "hf-token"})
+    ]
+
+
+def test_provider_action_rejects_unknown_actions(monkeypatch):
+    monkeypatch.setattr(
+        client_module.CloudOffloadClient,
+        "_json",
+        lambda self, method, path, **kwargs: pytest.fail("must not reach the wire"),
+    )
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    with pytest.raises(CloudOffloadError, match="Unsupported provider action"):
+        instance.provider_action("huggingface", "delete-everything")
+
+
 # === Coordinator config (UI-editable policy) ===
 
 def test_config_client_reads_and_patches(monkeypatch):

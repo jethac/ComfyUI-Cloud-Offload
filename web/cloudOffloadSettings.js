@@ -481,6 +481,17 @@ export function openProviderManager() {
         <span data-policy-result style="font-size:12px;opacity:.8"></span>
       </div>
     </fieldset>
+    <fieldset style="border:1px solid #3a3f55;border-radius:8px;padding:12px;margin:0 0 12px">
+      <legend style="padding:0 6px;opacity:.85">Hugging Face token</legend>
+      ${field("Access token", "Rented workers use it to download gated profile weights; public repos need none. Stored by the coordinator, never shown again. Prefer a fine-grained read-only token — a pod's environment is visible to the provider account.")}
+        <input data-hf-token type="password" placeholder="paste token" autocomplete="off" />
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <button type="button" data-action="save-hf-token">Save</button>
+        <span data-hf-status style="font-size:12px;opacity:.85"></span>
+        <span data-hf-result style="font-size:12px;opacity:.8"></span>
+      </div>
+    </fieldset>
     <div data-list>Loading…</div>
     <div data-specs></div>
     <div style="display:flex;justify-content:flex-end;margin-top:16px"><button type="button" data-action="close">Close</button></div>`
@@ -498,17 +509,48 @@ export function openProviderManager() {
   const rateInput = panel.querySelector("[data-max-rate]")
   const ingressSelect = panel.querySelector("[data-ingress]")
   const policyResult = panel.querySelector("[data-policy-result]")
+
+  // Hugging Face token: write-only, like the provider keys. The coordinator
+  // only ever reports a boolean, so the field never echoes a stored value.
+  const hfInput = panel.querySelector("[data-hf-token]")
+  const hfStatus = panel.querySelector("[data-hf-status]")
+  const hfResult = panel.querySelector("[data-hf-result]")
+  const showHfConfigured = (configured) => {
+    hfStatus.textContent = configured ? "configured" : "no token stored"
+    hfStatus.style.color = configured ? "#5fbf7f" : "#d8a24a"
+    hfInput.placeholder = configured ? "•••••••• (leave blank to keep)" : "paste token"
+  }
+
   api.fetchApi("/cloud_offload/config")
     .then((response) => response.json())
     .then((payload) => {
       const cloud = payload.cloud || payload
       if (typeof cloud.max_hourly_rate === "number") rateInput.value = cloud.max_hourly_rate
       if (cloud.ingress) ingressSelect.value = cloud.ingress
+      showHfConfigured(Boolean(cloud.huggingface_configured))
     })
     .catch(() => {
       policyResult.textContent = "Coordinator unreachable"
       policyResult.style.color = "#d8747f"
     })
+  panel.querySelector('[data-action="save-hf-token"]').addEventListener("click", async () => {
+    const token = hfInput.value.trim()
+    if (!token) {
+      hfResult.textContent = "Paste a token first"
+      hfResult.style.color = "#d8747f"
+      return
+    }
+    try {
+      await providerRequest("huggingface", "credentials", { api_key: token })
+      hfInput.value = ""
+      hfResult.textContent = "Saved"
+      hfResult.style.color = "#5fbf7f"
+      showHfConfigured(true)
+    } catch (error) {
+      hfResult.textContent = String(error.message || error)
+      hfResult.style.color = "#d8747f"
+    }
+  })
   panel.querySelector('[data-action="save-policy"]').addEventListener("click", async () => {
     const value = Number(rateInput.value)
     if (!Number.isFinite(value) || value <= 0) {
