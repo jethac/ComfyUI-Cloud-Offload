@@ -2,6 +2,7 @@
 name = "cloud-offload"
 description = "Run selected ComfyUI nodes on rented cloud GPUs as a visible, editable Cloud Offload box, with live progress, previews, and errors relayed in place."
 version = "0.1.0"
+license = { file = "LICENSE" }
 requires-python = ">=3.9"
 dependencies = [
     "requests>=2.28",

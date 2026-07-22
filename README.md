@@ -93,3 +93,7 @@ Only portable boundary values may cross the box edge (`IMAGE`, `MASK`,
 buffers, and file-backed mesh / 3D-file artifacts). Live objects (`MODEL`,
 `CLIP`, `VAE`, control nets, samplers, …) are rejected before a paid runner is
 provisioned; move their loader or producer inside the box.
+
+## License
+
+Apache-2.0
