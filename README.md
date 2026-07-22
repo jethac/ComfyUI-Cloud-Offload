@@ -6,9 +6,12 @@ on a remote runner while the original nodes stay expanded and report live
 progress, previews, and errors in place.
 
 This pack is a thin client. All provisioning, queueing, provider credentials,
-and remote execution live in the separately built **Cloud Offload coordinator**
-service (repo `cloud-offload`, Python package `cloud_offload`). RunPod is the
-default provider; Vast.ai is the alternative.
+and remote execution live in the separately built
+**[Cloud Offload coordinator](https://github.com/jethac/cloud-offload)**
+service (Python package `cloud_offload`). RunPod is the default provider;
+Vast.ai is the alternative, and support for
+[studio fleets and pooled compute](https://github.com/jethac/cloud-offload/blob/main/docs/fleet-provider.md)
+is designed and on the roadmap.
 
 ## Requirements
 
@@ -27,9 +30,8 @@ default provider; Vast.ai is the alternative.
 2. Clone or symlink this pack into `custom_nodes`:
    ```bash
    cd ComfyUI/custom_nodes
-   git clone <remote-url> ComfyUI-Cloud-Offload
-   # or, for dev, junction/symlink your working copy:
-   # mklink /J ComfyUI-Cloud-Offload B:\lab\ComfyUI-Cloud-Offload
+   git clone https://github.com/jethac/ComfyUI-Cloud-Offload.git
+   # (or junction/symlink a development checkout)
    ```
 
 3. Restart ComfyUI.
