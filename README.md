@@ -27,11 +27,14 @@ is designed and on the roadmap.
    python -m cloud_offload serve --host 127.0.0.1
    ```
 
-2. Clone or symlink this pack into `custom_nodes`:
+2. Install the pack — from the [Comfy Registry](https://registry.comfy.org/publishers/jethac/nodes/cloud-offload):
+   ```bash
+   comfy node install cloud-offload
+   ```
+   or clone into `custom_nodes`:
    ```bash
    cd ComfyUI/custom_nodes
    git clone https://github.com/jethac/ComfyUI-Cloud-Offload.git
-   # (or junction/symlink a development checkout)
    ```
 
 3. Restart ComfyUI.
