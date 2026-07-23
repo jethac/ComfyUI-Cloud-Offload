@@ -51,6 +51,38 @@ function partitionSettings() {
   }
 }
 
+// On-prem asset patterns are coordinator policy, fetched through the config
+// proxy at queue time with a short cache. The fetch itself fails open — no
+// patterns retrievable means no blocking — because a residency check must not
+// brick queueing; the coordinator still refuses on-prem jobs at cloud
+// backends, so the guarantee does not rest on this fetch.
+const ON_PREM_PATTERN_CACHE_MS = 30 * 1000
+let onPremPatternCache = null
+
+async function fetchOnPremPatterns() {
+  const now = Date.now()
+  if (onPremPatternCache && now - onPremPatternCache.at < ON_PREM_PATTERN_CACHE_MS) {
+    return onPremPatternCache.patterns
+  }
+  try {
+    const response = await api.fetchApi("/cloud_offload/config")
+    if (!response.ok) throw new Error(`config ${response.status}`)
+    const payload = await response.json()
+    const cloud = payload.cloud || payload
+    const patterns = (Array.isArray(cloud.on_prem_assets) ? cloud.on_prem_assets : [])
+      .map((pattern) => String(pattern).trim())
+      .filter(Boolean)
+    onPremPatternCache = { at: now, patterns }
+    return patterns
+  } catch (error) {
+    console.warn(
+      "Cloud Offload: on-prem asset patterns unavailable; queueing without residency blocking",
+      error
+    )
+    return []
+  }
+}
+
 // Providers are discovered from the coordinator so plugin-registered connectors
 // appear without shipping a new node pack. The dialog stays usable if the
 // coordinator is unreachable: "Auto" is always present.
@@ -329,7 +361,9 @@ app.registerExtension({
       const graph = args[0] || app.graph
       const partitions = collectPartitions(graph)
       if (!partitions.length) return result
-      const compiled = compilePartitions(result.output, partitions)
+      const compiled = compilePartitions(result.output, partitions, {
+        onPremPatterns: await fetchOnPremPatterns(),
+      })
       result.output = compiled.prompt
       result.workflow.extra ||= {}
       result.workflow.extra.cloud_offload_partitions = partitions.map(({ type_map, runtime, ...item }) => item)

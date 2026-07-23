@@ -507,3 +507,35 @@ def test_config_client_reads_and_patches(monkeypatch):
         ("GET", "/api/config", None),
         ("POST", "/api/config", {"max_hourly_rate": 1.5}),
     ]
+
+
+def test_config_client_round_trips_on_prem_asset_patterns(monkeypatch):
+    """The residency policy rides the existing config proxy path unchanged.
+
+    The queue-time compiler reads ``on_prem_assets`` from GET /api/config and
+    the provider dialog writes it back through POST, exactly like the other
+    non-secret policy fields.
+    """
+    calls = []
+
+    def fake_json(self, method, path, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        if method == "GET":
+            return {"cloud": {"on_prem_assets": ["studiox_*.safetensors"]}}
+        return {"config": {"on_prem_assets": payload["on_prem_assets"]}}
+
+    monkeypatch.setattr(client_module.CloudOffloadClient, "_json", fake_json)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    assert instance.get_config()["cloud"]["on_prem_assets"] == [
+        "studiox_*.safetensors"
+    ]
+    result = instance.update_config(
+        {"on_prem_assets": ["studiox_*.safetensors", "nda_*"]}
+    )
+
+    assert result["config"]["on_prem_assets"] == ["studiox_*.safetensors", "nda_*"]
+    assert calls == [
+        ("GET", "/api/config", None),
+        ("POST", "/api/config", {"on_prem_assets": ["studiox_*.safetensors", "nda_*"]}),
+    ]

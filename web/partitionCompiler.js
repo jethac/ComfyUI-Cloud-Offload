@@ -47,7 +47,101 @@ function nodeOutputType(typeMap, nodeId, outputIndex) {
   return typeMap[String(nodeId)]?.outputs?.[outputIndex] || "*"
 }
 
-export function compilePartition(prompt, partition) {
+// Case-insensitive fnmatch-style glob: `*` matches any run of characters
+// (including none), `?` matches exactly one. Anchored to the whole string, so
+// a pattern without wildcards is an exact (case-folded) match.
+export function globMatch(pattern, value) {
+  const escaped = String(pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&")
+  const source = escaped.replace(/\*/g, ".*").replace(/\?/g, ".")
+  return new RegExp(`^${source}$`, "is").test(String(value))
+}
+
+// Taint roots: every node with a plain string widget value matching an on-prem
+// asset pattern. Link arrays are references to other nodes, not asset names,
+// so only string values are considered.
+export function findTaintedNodes(prompt, patterns) {
+  const tainted = new Map()
+  const active = (patterns || []).filter((pattern) => String(pattern).trim())
+  if (!active.length) return tainted
+  for (const [nodeId, node] of Object.entries(prompt)) {
+    for (const [inputName, value] of Object.entries(node.inputs || {})) {
+      if (typeof value !== "string") continue
+      if (!active.some((pattern) => globMatch(pattern, value))) continue
+      tainted.set(String(nodeId), { asset: value, inputName })
+      break
+    }
+  }
+  return tainted
+}
+
+// An on-prem asset taints every value derived from it: BFS downstream over the
+// prompt's links, where an input of the form [nodeId, slot] is an edge from
+// that upstream node. Returns the roots plus everything they reach.
+export function propagateTaint(prompt, taintedRoots) {
+  const consumers = new Map()
+  for (const [nodeId, node] of Object.entries(prompt)) {
+    for (const value of Object.values(node.inputs || {})) {
+      if (!isLink(value)) continue
+      const sourceId = String(value[0])
+      if (!consumers.has(sourceId)) consumers.set(sourceId, [])
+      consumers.get(sourceId).push(String(nodeId))
+    }
+  }
+  const tainted = new Set([...taintedRoots.keys()].map(String))
+  const queue = [...tainted]
+  while (queue.length) {
+    for (const consumerId of consumers.get(queue.shift()) || []) {
+      if (tainted.has(consumerId)) continue
+      tainted.add(consumerId)
+      queue.push(consumerId)
+    }
+  }
+  return tainted
+}
+
+// Walk a tainted node's links upstream to the root that introduced the taint,
+// so the error can name the asset rather than an innocent downstream node.
+function taintRootFor(prompt, taintedRoots, nodeId) {
+  const visited = new Set()
+  const queue = [String(nodeId)]
+  while (queue.length) {
+    const currentId = queue.shift()
+    if (visited.has(currentId)) continue
+    visited.add(currentId)
+    if (taintedRoots.has(currentId)) return currentId
+    for (const value of Object.values(prompt[currentId]?.inputs || {})) {
+      if (isLink(value)) queue.push(String(value[0]))
+    }
+  }
+  return null
+}
+
+// A partition is cloud-eligible only if no tainted asset is referenced inside
+// it and no tainted value crosses into it; propagation covers both, because a
+// member fed by a tainted upstream is itself downstream-tainted. Returns
+// whether the partition is tainted; for a cloud-class backend that is a
+// blocking error raised before anything is uploaded or provisioned.
+function checkResidency(prompt, members, onPremPatterns, residencyClass) {
+  const taintedRoots = findTaintedNodes(prompt, onPremPatterns)
+  if (!taintedRoots.size) return false
+  const taintedNodes = propagateTaint(prompt, taintedRoots)
+  const taintedMember = [...members].find((memberId) => taintedNodes.has(memberId))
+  if (taintedMember === undefined) return false
+  if (residencyClass !== "on-prem") {
+    const rootId = taintRootFor(prompt, taintedRoots, taintedMember)
+    const { asset } = taintedRoots.get(rootId)
+    const title = prompt[rootId]?._meta?.title
+    throw new Error(
+      `Partition uses "${asset}", which is tagged on-prem only ` +
+      `(introduced by node ${rootId}${title ? ` "${title}"` : ""}). ` +
+      `Choose an on-prem backend for this partition, or remove the asset.`
+    )
+  }
+  return true
+}
+
+export function compilePartition(prompt, partition, options = {}) {
+  const { onPremPatterns = [], residencyClass = "cloud" } = options
   const local = clone(prompt)
   const members = new Set(partition.members.map(String))
   const prefix = `__comfy_${safeId(partition.partition_id)}`
@@ -67,6 +161,10 @@ export function compilePartition(prompt, partition) {
     }
     remote[memberId] = clone(local[memberId])
   }
+
+  // Residency is checked before boundary bridging: a partition blocked for
+  // on-prem-only assets must fail on that, not on an incidental type error.
+  const tainted = checkResidency(local, members, onPremPatterns, residencyClass)
 
   for (const memberId of members) {
     const node = remote[memberId]
@@ -127,6 +225,9 @@ export function compilePartition(prompt, partition) {
   const remoteSpec = {
     schema: "comfy.partition.job.v1",
     partition_id: partition.partition_id,
+    // Only stamped when tainted: the coordinator refuses "on-prem" jobs at
+    // cloud backends, so the field is the compiled form of the taint analysis.
+    ...(tainted ? { residency: "on-prem" } : {}),
     workflow: remote,
     inputs,
     outputs: outputs.map(({ extract_id, ...item }) => item),
@@ -157,7 +258,7 @@ export function compilePartition(prompt, partition) {
   return { prompt: local, remoteSpec, gatewayId }
 }
 
-export function compilePartitions(prompt, partitions) {
+export function compilePartitions(prompt, partitions, options = {}) {
   let compiled = clone(prompt)
   const specs = []
   const claimed = new Set()
@@ -166,7 +267,7 @@ export function compilePartitions(prompt, partitions) {
       if (claimed.has(nodeId)) throw new Error(`Node ${nodeId} belongs to overlapping Cloud Offload boxes`)
       claimed.add(nodeId)
     }
-    const result = compilePartition(compiled, partition)
+    const result = compilePartition(compiled, partition, options)
     compiled = result.prompt
     specs.push(result.remoteSpec)
   }

@@ -476,6 +476,9 @@ export function openProviderManager() {
           <option value="cloudflared">Automatic — open a Cloudflare tunnel</option>
         </select>
       </label>
+      ${field("On-prem assets", "One glob per line (case-insensitive, * and ?), matched against asset names such as checkpoints and LoRAs. A partition that uses or depends on a matching asset is blocked from cloud backends at queue time.")}
+        <textarea data-on-prem-assets rows="3" spellcheck="false" placeholder="studiox_*.safetensors" style="font:12px ui-monospace,Consolas,monospace;resize:vertical"></textarea>
+      </label>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
         <button type="button" data-action="save-policy">Save</button>
         <span data-policy-result style="font-size:12px;opacity:.8"></span>
@@ -508,6 +511,7 @@ export function openProviderManager() {
   // per-browser setting, so it is read from and written to the coordinator.
   const rateInput = panel.querySelector("[data-max-rate]")
   const ingressSelect = panel.querySelector("[data-ingress]")
+  const onPremInput = panel.querySelector("[data-on-prem-assets]")
   const policyResult = panel.querySelector("[data-policy-result]")
 
   // Hugging Face token: write-only, like the provider keys. The coordinator
@@ -527,6 +531,7 @@ export function openProviderManager() {
       const cloud = payload.cloud || payload
       if (typeof cloud.max_hourly_rate === "number") rateInput.value = cloud.max_hourly_rate
       if (cloud.ingress) ingressSelect.value = cloud.ingress
+      if (Array.isArray(cloud.on_prem_assets)) onPremInput.value = cloud.on_prem_assets.join("\n")
       showHfConfigured(Boolean(cloud.huggingface_configured))
     })
     .catch(() => {
@@ -558,11 +563,19 @@ export function openProviderManager() {
       policyResult.style.color = "#d8747f"
       return
     }
+    const onPremAssets = onPremInput.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
     try {
       const response = await api.fetchApi("/cloud_offload/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_hourly_rate: value, ingress: ingressSelect.value }),
+        body: JSON.stringify({
+          max_hourly_rate: value,
+          ingress: ingressSelect.value,
+          on_prem_assets: onPremAssets,
+        }),
       })
       const payload = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`)

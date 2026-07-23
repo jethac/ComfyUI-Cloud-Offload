@@ -1,7 +1,13 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { compilePartition, compilePartitions } from "./partitionCompiler.js"
+import {
+  compilePartition,
+  compilePartitions,
+  findTaintedNodes,
+  globMatch,
+  propagateTaint,
+} from "./partitionCompiler.js"
 
 function fixture(type = "IMAGE") {
   return {
@@ -64,4 +70,94 @@ test("deduplicates a remote output consumed by multiple local nodes", () => {
   const captures = Object.values(result.remoteSpec.workflow).filter((node) => node.class_type === "CloudPartitionOutput")
   assert.equal(captures.length, 1)
   assert.deepEqual(result.prompt["4"].inputs.images, result.prompt["5"].inputs.images)
+})
+
+// === On-prem asset residency ===
+
+function taintFixture() {
+  return {
+    "1": {
+      class_type: "CheckpointLoaderSimple",
+      inputs: { ckpt_name: "StudioX_Hero.safetensors" },
+      _meta: { title: "Load Checkpoint" },
+    },
+    "2": { class_type: "CLIPTextEncode", inputs: { clip: ["1", 1], text: "portrait" } },
+    "3": { class_type: "KSampler", inputs: { model: ["1", 0], positive: ["2", 0] } },
+    "4": { class_type: "VAEDecode", inputs: { samples: ["3", 0], vae: ["1", 2] } },
+    "9": { class_type: "LoadImage", inputs: { image: "unrelated.png" } },
+  }
+}
+
+test("glob matcher is case-insensitive and anchored, with * and ? only", () => {
+  assert.ok(globMatch("studiox_*.safetensors", "StudioX_Hero.safetensors"))
+  assert.ok(globMatch("hero_?.png", "hero_1.png"))
+  assert.ok(!globMatch("hero_?.png", "hero_12.png"))
+  // Anchored: a pattern without wildcards is not a substring match.
+  assert.ok(!globMatch("hero", "hero.safetensors"))
+  // Regex metacharacters in patterns and values are literal.
+  assert.ok(globMatch("a+b*.ckpt", "a+b_model.ckpt"))
+  assert.ok(!globMatch("a.b", "aXb"))
+})
+
+test("finds taint roots in string widget values, never in links", () => {
+  const tainted = findTaintedNodes(taintFixture(), ["studiox_*.safetensors"])
+  assert.deepEqual([...tainted.keys()], ["1"])
+  assert.deepEqual(tainted.get("1"), {
+    asset: "StudioX_Hero.safetensors",
+    inputName: "ckpt_name",
+  })
+  assert.equal(findTaintedNodes(taintFixture(), []).size, 0)
+})
+
+test("taint propagates downstream through multi-hop chains and fan-out", () => {
+  const prompt = taintFixture()
+  const tainted = propagateTaint(prompt, findTaintedNodes(prompt, ["studiox_*"]))
+  // 1 fans out to 2, 3 and 4 directly; 3 is also reached via 1 -> 2 -> 3.
+  assert.deepEqual([...tainted].sort(), ["1", "2", "3", "4"])
+  assert.ok(!tainted.has("9"))
+})
+
+test("blocks a cloud partition whose member references a tainted asset", () => {
+  const { prompt, partition } = fixture()
+  prompt["2"].inputs.lora = "nda_lora.safetensors"
+  assert.throws(
+    () => compilePartition(prompt, partition, { onPremPatterns: ["nda_*.safetensors"] }),
+    /Partition uses "nda_lora\.safetensors", which is tagged on-prem only \(introduced by node 2\)\. Choose an on-prem backend for this partition, or remove the asset\./
+  )
+})
+
+test("blocks a cloud partition fed by a tainted upstream across the boundary", () => {
+  const { prompt, partition } = fixture()
+  prompt["1"].inputs.image = "nda_plate.png"
+  prompt["1"]._meta = { title: "Load Plate" }
+  // The error names the introducing node, not the member it leaked into.
+  assert.throws(
+    () => compilePartitions(prompt, [partition], { onPremPatterns: ["nda_*"] }),
+    /Partition uses "nda_plate\.png", which is tagged on-prem only \(introduced by node 1 "Load Plate"\)/
+  )
+})
+
+test("does not block when taint exists elsewhere but never reaches the partition", () => {
+  const { prompt, partition } = fixture()
+  prompt["7"] = { class_type: "LoadImage", inputs: { image: "nda_reference.png" } }
+  prompt["8"] = { class_type: "PreviewImage", inputs: { images: ["7", 0] } }
+  const result = compilePartition(prompt, partition, { onPremPatterns: ["nda_*"] })
+  assert.equal(result.remoteSpec.residency, undefined)
+})
+
+test("stamps residency on the job spec when an on-prem backend takes the partition", () => {
+  const { prompt, partition } = fixture()
+  prompt["1"].inputs.image = "nda_plate.png"
+  const result = compilePartition(prompt, partition, {
+    onPremPatterns: ["nda_*"],
+    residencyClass: "on-prem",
+  })
+  assert.equal(result.remoteSpec.residency, "on-prem")
+
+  // An untainted partition carries no residency field even on-prem.
+  const clean = compilePartition(fixture().prompt, fixture().partition, {
+    onPremPatterns: ["nda_*"],
+    residencyClass: "on-prem",
+  })
+  assert.equal("residency" in clean.remoteSpec, false)
 })
