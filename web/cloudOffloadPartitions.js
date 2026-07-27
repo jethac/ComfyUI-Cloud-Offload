@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js"
 import { api } from "/scripts/api.js"
 import { compilePartitions } from "./partitionCompiler.js"
+import { formatBalance } from "./providerBalance.js"
 import {
   SETTING_GPU_TYPE,
   SETTING_KEEP_WARM,
@@ -200,7 +201,7 @@ function populateProviders(select, hint, selected) {
     for (const entry of providers) {
       const option = document.createElement("option")
       option.value = entry.provider
-      const balance = entry.balance?.available ? ` · $${Number(entry.balance.credit ?? 0).toFixed(2)}` : ""
+      const balance = formatBalance(entry.balance)
       option.textContent = `${entry.display_name || entry.provider}${entry.configured ? balance : " (needs credentials)"}`
       option.disabled = !entry.configured
       select.appendChild(option)
