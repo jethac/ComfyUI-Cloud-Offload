@@ -1,4 +1,6 @@
 import { app } from "/scripts/app.js"
+
+import { ON_PREM_SCOPES, parseOnPremEntries, serializeOnPremEntries } from "./onPremPolicy.js"
 import { api } from "/scripts/api.js"
 
 // Cloud Offload preferences live in ComfyUI's own settings store, following the
@@ -476,9 +478,10 @@ export function openProviderManager() {
           <option value="cloudflared">Automatic — open a Cloudflare tunnel</option>
         </select>
       </label>
-      ${field("On-prem assets", "One glob per line (case-insensitive, * and ?), matched against asset names such as checkpoints and LoRAs. A partition that uses or depends on a matching asset is blocked from cloud backends at queue time.")}
-        <textarea data-on-prem-assets rows="3" spellcheck="false" placeholder="studiox_*.safetensors" style="font:12px ui-monospace,Consolas,monospace;resize:vertical"></textarea>
+      ${field("On-prem assets", "Globs (case-insensitive, * and ?) matched against asset names such as checkpoints and LoRAs. A partition that uses a matching asset is blocked from cloud backends at queue time. Weights only restricts the file itself, so images made with it can still be offloaded; Weights and outputs also restricts everything computed from it.")}
+        <div data-on-prem-rows style="display:flex;flex-direction:column;gap:6px"></div>
       </label>
+      <button type="button" data-action="add-on-prem" style="align-self:flex-start;margin-top:6px">Add pattern</button>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
         <button type="button" data-action="save-policy">Save</button>
         <span data-policy-result style="font-size:12px;opacity:.8"></span>
@@ -511,7 +514,51 @@ export function openProviderManager() {
   // per-browser setting, so it is read from and written to the coordinator.
   const rateInput = panel.querySelector("[data-max-rate]")
   const ingressSelect = panel.querySelector("[data-ingress]")
-  const onPremInput = panel.querySelector("[data-on-prem-assets]")
+  const onPremRows = panel.querySelector("[data-on-prem-rows]")
+
+  // One row per policy entry. The scope lives in a dropdown rather than a line
+  // of text so a scoped entry can never be flattened into an unparseable string.
+  const addOnPremRow = (entry = { pattern: "", scope: "derived" }) => {
+    const row = document.createElement("div")
+    row.dataset.onPremRow = "1"
+    row.style.cssText = "display:flex;gap:6px;align-items:center"
+    const pattern = document.createElement("input")
+    pattern.type = "text"
+    pattern.dataset.pattern = "1"
+    pattern.placeholder = "studiox_*.safetensors"
+    pattern.spellcheck = false
+    pattern.value = entry.pattern
+    pattern.style.cssText = "flex:1;font:12px ui-monospace,Consolas,monospace"
+    const scope = document.createElement("select")
+    scope.dataset.scope = "1"
+    for (const option of ON_PREM_SCOPES) {
+      const el = document.createElement("option")
+      el.value = option.value
+      el.textContent = option.label
+      scope.appendChild(el)
+    }
+    scope.value = entry.scope
+    const remove = document.createElement("button")
+    remove.type = "button"
+    remove.textContent = "✕"
+    remove.title = "Remove this pattern"
+    remove.addEventListener("click", () => row.remove())
+    row.append(pattern, scope, remove)
+    onPremRows.appendChild(row)
+    return row
+  }
+
+  const readOnPremRows = () =>
+    serializeOnPremEntries(
+      [...onPremRows.querySelectorAll("[data-on-prem-row]")].map((row) => ({
+        pattern: row.querySelector("[data-pattern]").value,
+        scope: row.querySelector("[data-scope]").value,
+      })),
+    )
+
+  panel
+    .querySelector('[data-action="add-on-prem"]')
+    .addEventListener("click", () => addOnPremRow())
   const policyResult = panel.querySelector("[data-policy-result]")
 
   // Hugging Face token: write-only, like the provider keys. The coordinator
@@ -531,7 +578,10 @@ export function openProviderManager() {
       const cloud = payload.cloud || payload
       if (typeof cloud.max_hourly_rate === "number") rateInput.value = cloud.max_hourly_rate
       if (cloud.ingress) ingressSelect.value = cloud.ingress
-      if (Array.isArray(cloud.on_prem_assets)) onPremInput.value = cloud.on_prem_assets.join("\n")
+      if (Array.isArray(cloud.on_prem_assets)) {
+        onPremRows.replaceChildren()
+        for (const entry of parseOnPremEntries(cloud.on_prem_assets)) addOnPremRow(entry)
+      }
       showHfConfigured(Boolean(cloud.huggingface_configured))
     })
     .catch(() => {
@@ -563,10 +613,7 @@ export function openProviderManager() {
       policyResult.style.color = "#d8747f"
       return
     }
-    const onPremAssets = onPremInput.value
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
+    const onPremAssets = readOnPremRows()
     try {
       const response = await api.fetchApi("/cloud_offload/config", {
         method: "POST",
