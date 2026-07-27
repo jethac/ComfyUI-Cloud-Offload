@@ -14,11 +14,22 @@ const COMMAND_MARK = "CloudOffload.MarkSelection"
 const COMMAND_UNMARK = "CloudOffload.UnmarkSelection"
 const COMMAND_CONFIGURE = "CloudOffload.ConfigureSelection"
 const FLAG = "cloud_offload_partition"
+const PROP_ON_PREM = "cloud_offload.on_prem"
 const PROFILE = "comfyui-partition-v1"
 const COLOR = "#4b63d3"
 const RUNNING_COLOR = "#c58a17"
 const COMPLETE_COLOR = "#2f8f55"
 const FAILED_COLOR = "#b13c4a"
+const ON_PREM_BADGE_BG = "#3b2f14"
+const ON_PREM_BADGE_FG = "#e0ae4b"
+
+// The two scopes the compiler understands, plus the absence of a mark. Ordered
+// loosest first, which is also the order they read in the menu.
+const ON_PREM_SCOPES = [
+  [null, "Off"],
+  ["weights", "Weights only"],
+  ["derived", "Weights and outputs"],
+]
 
 function uuid() {
   return globalThis.crypto?.randomUUID?.() || `cloud-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -349,6 +360,69 @@ function unmarkSelection() {
   canvas?.setDirty(true, true)
 }
 
+// A node's on-prem mark lives in a node property, so it serializes into the
+// workflow and travels with it — unlike coordinator policy, which is a property
+// of the installation. The menu and the badge are two views of that one value.
+function onPremScope(node) {
+  const scope = node?.properties?.[PROP_ON_PREM]
+  return scope === "weights" || scope === "derived" ? scope : null
+}
+
+function setOnPremScope(nodes, scope) {
+  for (const node of nodes) {
+    node.properties ||= {}
+    if (scope) node.properties[PROP_ON_PREM] = scope
+    else delete node.properties[PROP_ON_PREM]
+  }
+  app.canvas?.setDirty?.(true, true)
+}
+
+// Right-clicking a node that is part of the selection marks the whole
+// selection; right-clicking one outside it marks only that node.
+function onPremTargets(node) {
+  const selected = selectedNodes()
+  return selected.includes(node) ? selected : [node]
+}
+
+function onPremMenuItem(node) {
+  const current = onPremScope(node)
+  return {
+    content: "On-prem only",
+    submenu: {
+      options: ON_PREM_SCOPES.map(([scope, label]) => ({
+        content: `${scope === current ? "●" : "○"} ${label}`,
+        callback: () => setOnPremScope(onPremTargets(node), scope),
+      })),
+    },
+  }
+}
+
+// Registered once per node as a callback, because the frontend re-runs it on
+// every draw: clearing the property clears the badge without further wiring.
+// A badge with no text measures and draws as nothing, which is the unmarked case.
+function onPremBadge(node) {
+  const scope = onPremScope(node)
+  return new LGraphBadge({
+    text: scope === "weights" ? "on-prem (weights)" : scope ? "on-prem" : "",
+    fgColor: ON_PREM_BADGE_FG,
+    bgColor: ON_PREM_BADGE_BG,
+    fontSize: 10,
+    height: 16,
+    cornerRadius: 4,
+  })
+}
+
+// Read from the live graph rather than the API prompt: properties are canvas
+// state and never reach the prompt. Ids are stringified to match its keys.
+function collectOnPremNodes(graph) {
+  const marks = {}
+  for (const node of graph?._nodes || graph?.nodes || []) {
+    const scope = onPremScope(node)
+    if (scope) marks[String(node.id)] = scope
+  }
+  return marks
+}
+
 function typeMapFor(nodes) {
   const result = {}
   for (const node of nodes) {
@@ -413,6 +487,15 @@ app.registerExtension({
     if (selectedNodes().length) return [COMMAND_MARK]
     return []
   },
+  getNodeMenuItems(node) {
+    return [onPremMenuItem(node)]
+  },
+  nodeCreated(node) {
+    // Badges are a frontend feature, not a litegraph one; where they are absent
+    // the property and its menu still work, only the marker is missing.
+    if (typeof LGraphBadge !== "function" || !Array.isArray(node.badges)) return
+    node.badges.push(() => onPremBadge(node))
+  },
   async setup() {
     api.addEventListener("comfy.partition.progress", handlePartitionEvent)
     const original = app.graphToPrompt.bind(app)
@@ -423,6 +506,7 @@ app.registerExtension({
       if (!partitions.length) return result
       const compiled = compilePartitions(result.output, partitions, {
         onPremPatterns: await fetchOnPremPatterns(),
+        onPremNodes: collectOnPremNodes(graph),
         assetManifest: await fetchAssetManifests(result.output, partitions),
       })
       result.output = compiled.prompt
