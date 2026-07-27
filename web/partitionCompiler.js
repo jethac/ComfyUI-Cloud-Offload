@@ -79,7 +79,8 @@ export function normalizeOnPremPatterns(patterns) {
 // Taint roots: every node with a plain string widget value matching an on-prem
 // asset pattern. Link arrays are references to other nodes, not asset names,
 // so only string values are considered. Each root carries the scope of the
-// pattern that matched, which decides whether its outputs travel.
+// pattern that matched, which decides whether its outputs travel, and the
+// source of the restriction, which decides how the error reads.
 export function findTaintedNodes(prompt, patterns) {
   const tainted = new Map()
   const active = normalizeOnPremPatterns(patterns)
@@ -89,11 +90,51 @@ export function findTaintedNodes(prompt, patterns) {
       if (typeof value !== "string") continue
       const hit = active.find((entry) => globMatch(entry.pattern, value))
       if (!hit) continue
-      tainted.set(String(nodeId), { asset: value, inputName, scope: hit.scope })
+      tainted.set(String(nodeId), { asset: value, inputName, scope: hit.scope, source: "policy" })
       break
     }
   }
   return tainted
+}
+
+// A marked node names itself in the error the way a pattern match would: its
+// first plain string input is almost always the file (ckpt_name, lora_name),
+// and where there is none the title or class at least identifies it on screen.
+function markedAsset(node) {
+  for (const [inputName, value] of Object.entries(node.inputs || {})) {
+    if (typeof value === "string") return { asset: value, inputName }
+  }
+  return { asset: node._meta?.title || node.class_type, inputName: null }
+}
+
+// Nodes carry their own mark in a `cloud_offload.on_prem` property, set from the
+// canvas and serialized into the workflow, so a restriction can travel with the
+// graph instead of living only in coordinator policy. `onPremNodes` maps node id
+// to scope; an id the prompt does not contain (muted, bypassed) restricts nothing.
+//
+// Marks only ever tighten. Where policy already restricts a node the stricter
+// scope wins — "derived" beats "weights" whichever side asked for it — so no
+// amount of right-clicking loosens a restriction the coordinator imposed.
+export function mergeNodeMarks(prompt, roots, onPremNodes) {
+  const merged = new Map(roots)
+  const marks = onPremNodes instanceof Map ? [...onPremNodes] : Object.entries(onPremNodes || {})
+  for (const [markedId, markedScope] of marks) {
+    if (!markedScope) continue
+    const nodeId = String(markedId)
+    const node = prompt[nodeId]
+    if (!node) continue
+    const scope = markedScope === "weights" ? "weights" : "derived"
+    const policy = merged.get(nodeId)
+    if (!policy) {
+      merged.set(nodeId, { ...markedAsset(node), scope, source: "node" })
+      continue
+    }
+    // Policy keeps its record — it names the asset it matched — and only the
+    // scope moves, never below what the pattern already asked for.
+    const tightest = policy.scope === "derived" || scope === "derived" ? "derived" : "weights"
+    merged.set(nodeId, { ...policy, scope: tightest })
+  }
+  return merged
 }
 
 // A "derived"-scope asset taints every value computed from it: BFS downstream
@@ -146,19 +187,28 @@ function taintRootFor(prompt, taintedRoots, nodeId) {
 // member fed by a tainted upstream is itself downstream-tainted. Returns
 // whether the partition is tainted; for a cloud-class backend that is a
 // blocking error raised before anything is uploaded or provisioned.
-function checkResidency(prompt, members, onPremPatterns, residencyClass) {
-  const taintedRoots = findTaintedNodes(prompt, onPremPatterns)
+function checkResidency(prompt, members, onPremPatterns, onPremNodes, residencyClass) {
+  const taintedRoots = mergeNodeMarks(prompt, findTaintedNodes(prompt, onPremPatterns), onPremNodes)
   if (!taintedRoots.size) return false
   const taintedNodes = propagateTaint(prompt, taintedRoots)
   const taintedMember = [...members].find((memberId) => taintedNodes.has(memberId))
   if (taintedMember === undefined) return false
   if (residencyClass !== "on-prem") {
     const rootId = taintRootFor(prompt, taintedRoots, taintedMember)
-    const { asset } = taintedRoots.get(rootId)
+    const { asset, source } = taintedRoots.get(rootId)
     const title = prompt[rootId]?._meta?.title
+    const where = `node ${rootId}${title ? ` "${title}"` : ""}`
+    // A mark the user put on a node is cleared by the user, not by editing
+    // policy, so the two restrictions ask for different things to be done.
+    if (source === "node") {
+      throw new Error(
+        `Partition uses "${asset}", which is marked on-prem only on ${where}. ` +
+        `Choose an on-prem backend for this partition, or clear the mark.`
+      )
+    }
     throw new Error(
       `Partition uses "${asset}", which is tagged on-prem only ` +
-      `(introduced by node ${rootId}${title ? ` "${title}"` : ""}). ` +
+      `(introduced by ${where}). ` +
       `Choose an on-prem backend for this partition, or remove the asset.`
     )
   }
@@ -191,7 +241,12 @@ function partitionAssets(partition, assetManifest) {
 }
 
 export function compilePartition(prompt, partition, options = {}) {
-  const { onPremPatterns = [], residencyClass = "cloud", assetManifest = null } = options
+  const {
+    onPremPatterns = [],
+    onPremNodes = null,
+    residencyClass = "cloud",
+    assetManifest = null,
+  } = options
   const local = clone(prompt)
   const members = new Set(partition.members.map(String))
   const prefix = `__comfy_${safeId(partition.partition_id)}`
@@ -215,7 +270,7 @@ export function compilePartition(prompt, partition, options = {}) {
   // Residency and assets are checked before boundary bridging: a partition
   // blocked for on-prem-only assets, or for a model this ComfyUI cannot
   // identify, must fail on that, not on an incidental type error.
-  const tainted = checkResidency(local, members, onPremPatterns, residencyClass)
+  const tainted = checkResidency(local, members, onPremPatterns, onPremNodes, residencyClass)
   const assets = partitionAssets(partition, assetManifest)
 
   for (const memberId of members) {

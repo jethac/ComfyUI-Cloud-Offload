@@ -6,6 +6,7 @@ import {
   compilePartitions,
   findTaintedNodes,
   globMatch,
+  mergeNodeMarks,
   propagateTaint,
 } from "./partitionCompiler.js"
 
@@ -106,6 +107,7 @@ test("finds taint roots in string widget values, never in links", () => {
     asset: "StudioX_Hero.safetensors",
     inputName: "ckpt_name",
     scope: "derived",
+    source: "policy",
   })
   assert.equal(findTaintedNodes(taintFixture(), []).size, 0)
 })
@@ -278,4 +280,120 @@ test("a weights-scope downstream partition compiles for the cloud", () => {
   const patterns = [{ pattern: "licensed_*.safetensors", scope: "weights" }]
   const out = compilePartition(scopeGraph, scopePartition(["3"]), { onPremPatterns: patterns })
   assert.ok(out.remoteSpec, "the upscale box offloads even though its input came from a restricted model")
+})
+
+// --- on-prem marks placed on the node itself ---
+
+test("a node mark becomes a taint root with the same scopes as a pattern", () => {
+  const derived = mergeNodeMarks(scopeGraph, new Map(), { "1": "derived" })
+  assert.deepEqual(derived.get("1"), {
+    asset: "licensed_base.safetensors",
+    inputName: "ckpt_name",
+    scope: "derived",
+    source: "node",
+  })
+  assert.ok(propagateTaint(scopeGraph, derived).has("3"), "derived marks reach downstream nodes")
+
+  const weights = mergeNodeMarks(scopeGraph, new Map(), new Map([["1", "weights"]]))
+  const tainted = propagateTaint(scopeGraph, weights)
+  assert.ok(tainted.has("1"), "the marked node itself stays restricted")
+  assert.ok(!tainted.has("3"), "a weights mark frees what is computed from it")
+
+  // A mark on a node the prompt does not contain — muted, bypassed — restricts nothing.
+  assert.equal(mergeNodeMarks(scopeGraph, new Map(), { "42": "derived" }).size, 0)
+})
+
+test("a node mark alone blocks a cloud partition with no patterns configured", () => {
+  assert.throws(
+    () => compilePartition(scopeGraph, scopePartition(["3"]), { onPremNodes: { "1": "derived" } }),
+    /marked on-prem only/,
+  )
+  const out = compilePartition(scopeGraph, scopePartition(["3"]), { onPremNodes: { "1": "weights" } })
+  assert.ok(out.remoteSpec, "a weights mark still lets the downstream box offload")
+  assert.throws(
+    () => compilePartition(scopeGraph, scopePartition(["1", "2"]), { onPremNodes: { "1": "weights" } }),
+    /marked on-prem only/,
+  )
+})
+
+test("a node mark tightens a pattern and can never loosen one", () => {
+  const weightsPolicy = [{ pattern: "licensed_*.safetensors", scope: "weights" }]
+  const tightened = mergeNodeMarks(
+    scopeGraph,
+    findTaintedNodes(scopeGraph, weightsPolicy),
+    { "1": "derived" },
+  )
+  assert.equal(tightened.get("1").scope, "derived")
+  assert.ok(propagateTaint(scopeGraph, tightened).has("3"), "the mark extends policy downstream")
+
+  // The other direction is the one that matters: a "weights" mark on a node the
+  // policy already restricts derived must not hand its outputs to a cloud box.
+  const derivedPolicy = [{ pattern: "licensed_*.safetensors", scope: "derived" }]
+  const loosened = mergeNodeMarks(
+    scopeGraph,
+    findTaintedNodes(scopeGraph, derivedPolicy),
+    { "1": "weights" },
+  )
+  assert.equal(loosened.get("1").scope, "derived")
+  assert.equal(loosened.get("1").source, "policy", "policy keeps the record it matched")
+  assert.throws(
+    () =>
+      compilePartition(scopeGraph, scopePartition(["3"]), {
+        onPremPatterns: derivedPolicy,
+        onPremNodes: { "1": "weights" },
+      }),
+    /tagged on-prem only/,
+  )
+})
+
+test("the error for a node mark names the node and does not claim a policy tag", () => {
+  const graph = {
+    ...scopeGraph,
+    "1": { ...scopeGraph["1"], _meta: { title: "Client Base Model" } },
+  }
+  assert.throws(
+    () => compilePartitions(graph, [scopePartition(["3"])], { onPremNodes: { "1": "derived" } }),
+    (error) => {
+      assert.equal(
+        error.message,
+        'Partition uses "licensed_base.safetensors", which is marked on-prem only on ' +
+        'node 1 "Client Base Model". Choose an on-prem backend for this partition, ' +
+        "or clear the mark.",
+      )
+      return true
+    },
+  )
+})
+
+test("marks leave pattern-only residency exactly as it was", () => {
+  const patterns = [{ pattern: "licensed_*.safetensors", scope: "weights" }]
+  const withoutMarks = compilePartition(scopeGraph, scopePartition(["3"]), { onPremPatterns: patterns })
+  const withNoMarks = compilePartition(scopeGraph, scopePartition(["3"]), {
+    onPremPatterns: patterns,
+    onPremNodes: {},
+  })
+  assert.deepEqual(withNoMarks.remoteSpec, withoutMarks.remoteSpec)
+  assert.throws(
+    () =>
+      compilePartition(scopeGraph, scopePartition(["1", "2"]), {
+        onPremPatterns: patterns,
+        onPremNodes: {},
+      }),
+    /tagged on-prem only/,
+  )
+})
+
+test("a marked node with no string input is named by its title, then its class", () => {
+  const graph = {
+    "1": { class_type: "KSampler", inputs: { model: ["9", 0] }, _meta: { title: "Hero Sampler" } },
+    "2": { class_type: "VAEDecode", inputs: { samples: ["1", 0] } },
+  }
+  const roots = mergeNodeMarks(graph, new Map(), { "1": "derived", "2": "weights" })
+  assert.deepEqual(roots.get("1"), {
+    asset: "Hero Sampler",
+    inputName: null,
+    scope: "derived",
+    source: "node",
+  })
+  assert.equal(roots.get("2").asset, "VAEDecode")
 })
