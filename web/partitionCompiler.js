@@ -56,27 +56,50 @@ export function globMatch(pattern, value) {
   return new RegExp(`^${source}$`, "is").test(String(value))
 }
 
+// An on-prem entry is either a bare glob (strict: outputs are restricted too)
+// or {pattern, scope}. Scope "weights" restricts only the file itself, which is
+// what most licences actually say — you may not redistribute the weights, but
+// the images they produce are yours. Scope "derived" additionally restricts
+// everything computed from it, for material whose appearance is the secret.
+export function normalizeOnPremPatterns(patterns) {
+  const normalized = []
+  for (const entry of patterns || []) {
+    if (typeof entry === "string") {
+      if (entry.trim()) normalized.push({ pattern: entry.trim(), scope: "derived" })
+      continue
+    }
+    const pattern = String(entry?.pattern || "").trim()
+    if (!pattern) continue
+    const scope = entry?.scope === "weights" ? "weights" : "derived"
+    normalized.push({ pattern, scope })
+  }
+  return normalized
+}
+
 // Taint roots: every node with a plain string widget value matching an on-prem
 // asset pattern. Link arrays are references to other nodes, not asset names,
-// so only string values are considered.
+// so only string values are considered. Each root carries the scope of the
+// pattern that matched, which decides whether its outputs travel.
 export function findTaintedNodes(prompt, patterns) {
   const tainted = new Map()
-  const active = (patterns || []).filter((pattern) => String(pattern).trim())
+  const active = normalizeOnPremPatterns(patterns)
   if (!active.length) return tainted
   for (const [nodeId, node] of Object.entries(prompt)) {
     for (const [inputName, value] of Object.entries(node.inputs || {})) {
       if (typeof value !== "string") continue
-      if (!active.some((pattern) => globMatch(pattern, value))) continue
-      tainted.set(String(nodeId), { asset: value, inputName })
+      const hit = active.find((entry) => globMatch(entry.pattern, value))
+      if (!hit) continue
+      tainted.set(String(nodeId), { asset: value, inputName, scope: hit.scope })
       break
     }
   }
   return tainted
 }
 
-// An on-prem asset taints every value derived from it: BFS downstream over the
-// prompt's links, where an input of the form [nodeId, slot] is an edge from
-// that upstream node. Returns the roots plus everything they reach.
+// A "derived"-scope asset taints every value computed from it: BFS downstream
+// over the prompt's links, where an input of the form [nodeId, slot] is an edge
+// from that upstream node. "weights"-scope roots are included as roots but seed
+// nothing, so the file stays home while its outputs are free to travel.
 export function propagateTaint(prompt, taintedRoots) {
   const consumers = new Map()
   for (const [nodeId, node] of Object.entries(prompt)) {
@@ -88,7 +111,9 @@ export function propagateTaint(prompt, taintedRoots) {
     }
   }
   const tainted = new Set([...taintedRoots.keys()].map(String))
-  const queue = [...tainted]
+  const queue = [...taintedRoots]
+    .filter(([, root]) => root.scope !== "weights")
+    .map(([nodeId]) => String(nodeId))
   while (queue.length) {
     for (const consumerId of consumers.get(queue.shift()) || []) {
       if (tainted.has(consumerId)) continue

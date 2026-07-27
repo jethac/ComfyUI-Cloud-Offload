@@ -105,6 +105,7 @@ test("finds taint roots in string widget values, never in links", () => {
   assert.deepEqual(tainted.get("1"), {
     asset: "StudioX_Hero.safetensors",
     inputName: "ckpt_name",
+    scope: "derived",
   })
   assert.equal(findTaintedNodes(taintFixture(), []).size, 0)
 })
@@ -220,4 +221,61 @@ test("stamps residency on the job spec when an on-prem backend takes the partiti
     residencyClass: "on-prem",
   })
   assert.equal("residency" in clean.remoteSpec, false)
+})
+
+// --- on-prem scopes: weights-only vs derived ---
+
+const scopeGraph = {
+  "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "licensed_base.safetensors" } },
+  "2": { class_type: "KSampler", inputs: { model: ["1", 0] } },
+  "3": { class_type: "ImageUpscaleWithModel", inputs: { image: ["2", 0] } },
+  "4": { class_type: "PreviewImage", inputs: { images: ["3", 0] } },
+}
+
+// "3" takes an IMAGE from the restricted model's sampler and returns an IMAGE:
+// the boxable downstream step in a generate-on-prem, upscale-in-cloud split.
+const scopePartition = (members) => ({
+  partition_id: `scope-${members.join("-")}`,
+  provider: "runpod",
+  members,
+  type_map: Object.fromEntries(
+    members.map((id) => [id, { inputs: { image: "IMAGE", model: "MODEL" }, outputs: ["IMAGE"] }]),
+  ),
+})
+
+test("weights scope keeps the file home but frees its outputs", () => {
+  const patterns = [{ pattern: "licensed_*.safetensors", scope: "weights" }]
+  const roots = findTaintedNodes(scopeGraph, patterns)
+  assert.equal(roots.size, 1)
+  assert.equal(roots.get("1").scope, "weights")
+  const tainted = propagateTaint(scopeGraph, roots)
+  assert.ok(tainted.has("1"), "the loader itself stays restricted")
+  assert.ok(!tainted.has("2"), "sampling from it is not restricted")
+  assert.ok(!tainted.has("3"), "the downstream upscale is free to offload")
+})
+
+test("derived scope restricts everything computed from the asset", () => {
+  const roots = findTaintedNodes(scopeGraph, [{ pattern: "licensed_*.safetensors", scope: "derived" }])
+  const tainted = propagateTaint(scopeGraph, roots)
+  assert.ok(tainted.has("2") && tainted.has("3"), "taint reaches downstream nodes")
+})
+
+test("a bare glob string stays strict", () => {
+  const roots = findTaintedNodes(scopeGraph, ["licensed_*.safetensors"])
+  assert.equal(roots.get("1").scope, "derived")
+  assert.ok(propagateTaint(scopeGraph, roots).has("3"), "strings keep restricting outputs")
+})
+
+test("a weights-scope partition still blocks when it holds the file itself", () => {
+  const patterns = [{ pattern: "licensed_*.safetensors", scope: "weights" }]
+  assert.throws(
+    () => compilePartition(scopeGraph, scopePartition(["1", "2"]), { onPremPatterns: patterns }),
+    /tagged on-prem only/,
+  )
+})
+
+test("a weights-scope downstream partition compiles for the cloud", () => {
+  const patterns = [{ pattern: "licensed_*.safetensors", scope: "weights" }]
+  const out = compilePartition(scopeGraph, scopePartition(["3"]), { onPremPatterns: patterns })
+  assert.ok(out.remoteSpec, "the upscale box offloads even though its input came from a restricted model")
 })
