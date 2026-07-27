@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js"
 
 import { ON_PREM_SCOPES, parseOnPremEntries, serializeOnPremEntries } from "./onPremPolicy.js"
+import { formatBalance } from "./providerBalance.js"
 import { api } from "/scripts/api.js"
 
 // Cloud Offload preferences live in ComfyUI's own settings store, following the
@@ -160,9 +161,7 @@ function providerCard(entry) {
   const status = entry.configured
     ? `<span style="color:#5fbf7f">configured</span>`
     : `<span style="color:#d8a24a">no credentials</span>`
-  const balance = entry.balance?.available
-    ? ` · $${Number(entry.balance.credit ?? 0).toFixed(2)}`
-    : ""
+  const balance = formatBalance(entry.balance)
   const schema = entry.settings_schema || []
   const settingsFields = schema
     .map((item) => {
@@ -673,11 +672,7 @@ export function openProviderManager() {
             const payload = await providerRequest(name, "test")
             say(
               payload.ok
-                ? `OK · ${payload.offer_count ?? 0} offers${
-                    payload.balance?.available
-                      ? ` · $${Number(payload.balance.credit ?? 0).toFixed(2)}`
-                      : ""
-                  }`
+                ? `OK · ${payload.offer_count ?? 0} offers${formatBalance(payload.balance)}`
                 : payload.error || "Failed",
               Boolean(payload.ok)
             )
