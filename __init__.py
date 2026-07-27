@@ -132,6 +132,38 @@ def _register_routes() -> None:
     async def cloud_offload_delete_spec(request):
         return await _proxy(client.delete_provider_spec, request.match_info["name"])
 
+    @PromptServer.instance.routes.post("/cloud_offload/assets")
+    async def cloud_offload_assets(request):
+        """Classify and digest the model files a boxed subgraph declares.
+
+        Purely local: unlike the routes above this one never reaches the
+        coordinator. The browser cannot read ``folder_paths`` or hash weights,
+        so the compiler asks the ComfyUI process it is already talking to, and
+        gets back the content identity of every model the box references.
+        """
+        import asyncio
+
+        if __package__:
+            from .asset_manifest import build_manifest
+        else:
+            from asset_manifest import build_manifest
+
+        body = await _read_body(request)
+        prompt = body.get("prompt")
+        member_ids = body.get("member_ids")
+        if not isinstance(prompt, dict) or not isinstance(member_ids, list):
+            return web.json_response(
+                {"error": "A prompt object and a member_ids list are required"},
+                status=400,
+            )
+        try:
+            payload = await asyncio.to_thread(build_manifest, prompt, member_ids)
+        except Exception as exc:
+            # 500, not the 502 the proxy routes use: the failure is this
+            # process's, and the compiler treats any error as "no manifest".
+            return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response(payload)
+
     @PromptServer.instance.routes.post(
         "/cloud_offload/providers/{provider}/{action}"
     )
