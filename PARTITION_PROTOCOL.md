@@ -87,6 +87,30 @@ post-provision failure into a green light followed by a paid failure. If the
 route itself is unreachable the compiler stamps no `assets` at all, and the job
 behaves as it did before declared assets existed.
 
+## Required node packs
+
+A compiled job may carry `node_packs`: the custom node packs its subgraph needs
+installed on the runner, each as `{id, directory, version, digest, declared}`.
+The list comes from the same route as `assets` (`POST /cloud_offload/assets`), in
+the same round trip, because both questions are asked about the same box at the
+same moment.
+
+Attribution is exact, not heuristic: ComfyUI reports the defining module of every
+node class it loaded (`nodes`, `comfy_extras.*` and `comfy_api_nodes.*` are core;
+`custom_nodes.<dir>` is a pack), which is the same value `/object_info` publishes
+as `python_module`.
+
+Every record carries a `digest` — sha256 over the pack's `.py` files, each
+contributing its relative path and then its bytes in sorted path order — because
+a declared `version` cannot be trusted to identify code. A pack may carry a
+security fix and still declare the version of the unpatched release published
+under the same number, so version equality proves nothing about content.
+
+Attribution is closed-world on the same terms as declared assets. A node type
+this ComfyUI cannot attribute to a pack blocks compilation, naming the class and
+node. If the route is unreachable, or pack detection fails, the compiler stamps
+no `node_packs` and the job behaves as it did before required node packs existed.
+
 ## Coordinator flow
 
 The local gateway uploads input bundles to authenticated coordinator artifact

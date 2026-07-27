@@ -94,64 +94,92 @@ async function fetchOnPremPatterns() {
   }
 }
 
-// The declared asset manifest comes from this ComfyUI, not the coordinator:
-// only the server process can map a widget string to a model file and hash it.
-// Cached briefly and keyed by the box's own inputs, because a compile pass that
-// changed nothing must not rehash the same weights.
+// What a box needs from the runner — the model files it references and the node
+// packs its node types come from — is known to this ComfyUI and to nothing else:
+// only the server process can map a widget string to a model file, hash it, and
+// say which pack defines a class_type. One POST answers both, so a box costs a
+// single round trip at queue time. Cached briefly and keyed by the box's own
+// nodes, because a compile pass that changed nothing must not rehash the same
+// weights.
 //
 // This fetch fails open like the on-prem one — an unreachable route logs and
-// queues without a manifest — but for a different reason. The *contents* of a
-// manifest we did receive fail closed: an unknown asset blocks in the compiler.
-// Failing open here is safe only because a manifest-less job stamps no assets,
-// and the coordinator treats such a job exactly as it did before this feature
-// existed: the runner gets its worker profile's static `weights` list and
-// nothing else. Bricking every queue when the route is missing (an older node
-// pack, a mid-upgrade reload) would be a worse trade than that fallback.
-const ASSET_MANIFEST_CACHE_MS = 30 * 1000
-const assetManifestCache = new Map()
+// queues without requirements — but for a different reason. The *contents* of a
+// report we did receive fail closed: an unknown asset or an unattributable node
+// type blocks in the compiler. Failing open here is safe only because a
+// report-less job stamps nothing, and the coordinator treats such a job exactly
+// as it did before these features existed: the runner gets its worker profile's
+// static `weights` and `custom_nodes` and nothing else. Bricking every queue
+// when the route is missing (an older node pack, a mid-upgrade reload) would be
+// a worse trade than that fallback.
+const REQUIREMENTS_CACHE_MS = 30 * 1000
+const requirementsCache = new Map()
 
-function assetManifestKey(prompt, partition) {
+// Keyed by class_type as well as inputs: swapping a node for another type with
+// the same widget values changes which pack the box needs, even when it changes
+// no filename.
+function requirementsKey(prompt, partition) {
   return JSON.stringify([
     partition.partition_id,
-    partition.members.map((nodeId) => prompt[String(nodeId)]?.inputs ?? null),
+    partition.members.map((nodeId) => {
+      const node = prompt[String(nodeId)]
+      return node ? [node.class_type ?? null, node.inputs ?? null] : null
+    }),
   ])
 }
 
-async function fetchAssetManifests(prompt, partitions) {
-  const manifests = {}
+// Absent node_packs is not an empty node_packs: an older node pack server, or
+// one whose detection failed, must leave the box unstamped rather than assert
+// that it needs nothing.
+function readNodePacks(payload) {
+  const reported = payload.node_packs
+  if (!reported || typeof reported !== "object") return null
+  return {
+    packs: Array.isArray(reported.packs) ? reported.packs : [],
+    unknown: Array.isArray(reported.unknown) ? reported.unknown : [],
+  }
+}
+
+async function fetchPartitionRequirements(prompt, partitions) {
+  const assetManifest = {}
+  const nodePacks = {}
   const now = Date.now()
-  for (const [key, entry] of assetManifestCache) {
-    if (now - entry.at >= ASSET_MANIFEST_CACHE_MS) assetManifestCache.delete(key)
+  for (const [key, entry] of requirementsCache) {
+    if (now - entry.at >= REQUIREMENTS_CACHE_MS) requirementsCache.delete(key)
   }
   for (const partition of partitions) {
-    const key = assetManifestKey(prompt, partition)
-    const cached = assetManifestCache.get(key)
-    if (cached) {
-      manifests[partition.partition_id] = cached.manifest
-      continue
-    }
-    try {
-      const response = await api.fetchApi("/cloud_offload/assets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, member_ids: partition.members.map(String) }),
-      })
-      if (!response.ok) throw new Error(`assets ${response.status}`)
-      const payload = await response.json()
-      const manifest = {
-        assets: Array.isArray(payload.assets) ? payload.assets : [],
-        unknown: Array.isArray(payload.unknown) ? payload.unknown : [],
+    const key = requirementsKey(prompt, partition)
+    let entry = requirementsCache.get(key)
+    if (!entry) {
+      try {
+        const response = await api.fetchApi("/cloud_offload/assets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, member_ids: partition.members.map(String) }),
+        })
+        if (!response.ok) throw new Error(`assets ${response.status}`)
+        const payload = await response.json()
+        entry = {
+          at: now,
+          manifest: {
+            assets: Array.isArray(payload.assets) ? payload.assets : [],
+            unknown: Array.isArray(payload.unknown) ? payload.unknown : [],
+          },
+          packs: readNodePacks(payload),
+        }
+        requirementsCache.set(key, entry)
+      } catch (error) {
+        console.warn(
+          "Cloud Offload: partition requirements unavailable; queueing without " +
+          "declared assets or node packs",
+          error
+        )
+        continue
       }
-      assetManifestCache.set(key, { at: now, manifest })
-      manifests[partition.partition_id] = manifest
-    } catch (error) {
-      console.warn(
-        "Cloud Offload: asset manifest unavailable; queueing without declared assets",
-        error
-      )
     }
+    assetManifest[partition.partition_id] = entry.manifest
+    if (entry.packs) nodePacks[partition.partition_id] = entry.packs
   }
-  return manifests
+  return { assetManifest, nodePacks }
 }
 
 // Providers are discovered from the coordinator so plugin-registered connectors
@@ -504,10 +532,12 @@ app.registerExtension({
       const graph = args[0] || app.graph
       const partitions = collectPartitions(graph)
       if (!partitions.length) return result
+      const requirements = await fetchPartitionRequirements(result.output, partitions)
       const compiled = compilePartitions(result.output, partitions, {
         onPremPatterns: await fetchOnPremPatterns(),
         onPremNodes: collectOnPremNodes(graph),
-        assetManifest: await fetchAssetManifests(result.output, partitions),
+        assetManifest: requirements.assetManifest,
+        nodePacks: requirements.nodePacks,
       })
       result.output = compiled.prompt
       result.workflow.extra ||= {}

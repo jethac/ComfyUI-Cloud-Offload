@@ -208,6 +208,83 @@ test("compiles unchanged when no manifest is available", () => {
   assert.deepEqual(withEmptyManifest.remoteSpec, withoutManifest.remoteSpec)
 })
 
+// === Required custom node packs ===
+
+const QWEN_PACK = {
+  id: "eric-qwen-layer",
+  directory: "eric-qwen-layer",
+  version: "0.1.0",
+  digest: "b".repeat(64),
+  declared: { id: true, version: true },
+}
+
+test("stamps the node packs the partition being compiled requires", () => {
+  const { prompt, partition } = fixture()
+  const result = compilePartition(prompt, partition, {
+    nodePacks: {
+      "partition-one": { packs: [QWEN_PACK], unknown: [] },
+      "other-box": { packs: [{ ...QWEN_PACK, id: "elsewhere" }], unknown: [] },
+    },
+  })
+
+  assert.deepEqual(result.remoteSpec.node_packs, [QWEN_PACK])
+  // Stamped by value: later edits to the report cannot rewrite a compiled job.
+  assert.notEqual(result.remoteSpec.node_packs[0], QWEN_PACK)
+})
+
+test("omits node packs when the box uses only core node types", () => {
+  const { prompt, partition } = fixture()
+  const result = compilePartition(prompt, partition, {
+    nodePacks: { "partition-one": { packs: [], unknown: [] } },
+  })
+
+  assert.equal("node_packs" in result.remoteSpec, false)
+})
+
+test("blocks a partition using a node type this ComfyUI cannot attribute", () => {
+  const { prompt, partition } = fixture()
+  assert.throws(
+    () =>
+      compilePartitions(prompt, [partition], {
+        nodePacks: {
+          "partition-one": {
+            packs: [QWEN_PACK],
+            unknown: [{ node_id: "3", class_type: "SomeUninstalledNode" }],
+          },
+        },
+      }),
+    (error) => {
+      assert.equal(
+        error.message,
+        'Partition uses node type "SomeUninstalledNode" (node 3), which this ' +
+        "ComfyUI cannot attribute to a node pack. Cloud Offload cannot guarantee " +
+        "the runner has it — remove the node from the box.",
+      )
+      return true
+    },
+  )
+})
+
+test("compiles unchanged when no node pack report is available", () => {
+  const { prompt, partition } = fixture()
+  const withoutReport = compilePartition(prompt, partition)
+  const withEmptyReport = compilePartition(prompt, partition, { nodePacks: {} })
+
+  assert.equal("node_packs" in withoutReport.remoteSpec, false)
+  assert.deepEqual(withEmptyReport.remoteSpec, withoutReport.remoteSpec)
+})
+
+test("assets and node packs are stamped side by side", () => {
+  const { prompt, partition } = fixture()
+  const result = compilePartition(prompt, partition, {
+    assetManifest: { "partition-one": { assets: [CHECKPOINT], unknown: [] } },
+    nodePacks: { "partition-one": { packs: [QWEN_PACK], unknown: [] } },
+  })
+
+  assert.deepEqual(result.remoteSpec.assets, [CHECKPOINT])
+  assert.deepEqual(result.remoteSpec.node_packs, [QWEN_PACK])
+})
+
 test("stamps residency on the job spec when an on-prem backend takes the partition", () => {
   const { prompt, partition } = fixture()
   prompt["1"].inputs.image = "nda_plate.png"

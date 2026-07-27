@@ -134,19 +134,29 @@ def _register_routes() -> None:
 
     @PromptServer.instance.routes.post("/cloud_offload/assets")
     async def cloud_offload_assets(request):
-        """Classify and digest the model files a boxed subgraph declares.
+        """Report everything a boxed subgraph needs from the runner.
 
         Purely local: unlike the routes above this one never reaches the
-        coordinator. The browser cannot read ``folder_paths`` or hash weights,
-        so the compiler asks the ComfyUI process it is already talking to, and
-        gets back the content identity of every model the box references.
+        coordinator. The browser cannot read ``folder_paths``, hash weights, or
+        ask which pack defines a node type, so the compiler asks the ComfyUI
+        process it is already talking to.
+
+        Both requirement kinds ride this one route rather than a sibling,
+        because they are asked at the same moment about the same box: two routes
+        would double the queue-time round trips for no gain. The model files
+        stay under ``assets``/``unknown`` exactly as before, and the packs
+        arrive as a self-contained ``node_packs`` object, so the two failure
+        messages stay distinct and an older compiler ignores the new field.
         """
         import asyncio
+        import logging
 
         if __package__:
             from .asset_manifest import build_manifest
+            from .node_requirements import build_node_requirements
         else:
             from asset_manifest import build_manifest
+            from node_requirements import build_node_requirements
 
         body = await _read_body(request)
         prompt = body.get("prompt")
@@ -162,6 +172,18 @@ def _register_routes() -> None:
             # 500, not the 502 the proxy routes use: the failure is this
             # process's, and the compiler treats any error as "no manifest".
             return web.json_response({"error": str(exc)}, status=500)
+        try:
+            payload["node_packs"] = await asyncio.to_thread(
+                build_node_requirements, prompt, member_ids
+            )
+        except Exception as exc:
+            # Node pack detection is additive, so its failure must not cost the
+            # asset manifest. Omitting the field lands on the compiler's
+            # no-manifest seam: nothing is stamped, and the coordinator behaves
+            # exactly as it did before node pack requirements existed.
+            logging.getLogger(__name__).warning(
+                "Cloud Offload could not determine required node packs: %s", exc
+            )
         return web.json_response(payload)
 
     @PromptServer.instance.routes.post(

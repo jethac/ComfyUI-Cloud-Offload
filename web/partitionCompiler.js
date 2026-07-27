@@ -240,12 +240,39 @@ function partitionAssets(partition, assetManifest) {
   return assets.length ? clone(assets) : null
 }
 
+// The required node packs are the other half of the same question the asset
+// manifest answers, and arrive by the same route: only the ComfyUI process can
+// say which pack defines a node type, so it reports them per box, keyed by
+// partition_id. A pack record carries its content digest, because a declared
+// version cannot distinguish a patched pack from the unpatched release that
+// shares its version number.
+//
+// An unattributable node type blocks for the same reason an unknown asset does:
+// a requirement list missing a pack is worse than no list at all. A missing
+// report does not block — see cloudOffloadPartitions.js for that seam.
+function partitionNodePacks(partition, nodePacks) {
+  const required = nodePacks?.[partition.partition_id]
+  if (!required) return null
+  const unknown = required.unknown || []
+  if (unknown.length) {
+    const { class_type, node_id } = unknown[0]
+    throw new Error(
+      `Partition uses node type "${class_type}" (node ${node_id}), which this ` +
+      `ComfyUI cannot attribute to a node pack. Cloud Offload cannot guarantee ` +
+      `the runner has it — remove the node from the box.`
+    )
+  }
+  const packs = required.packs || []
+  return packs.length ? clone(packs) : null
+}
+
 export function compilePartition(prompt, partition, options = {}) {
   const {
     onPremPatterns = [],
     onPremNodes = null,
     residencyClass = "cloud",
     assetManifest = null,
+    nodePacks = null,
   } = options
   const local = clone(prompt)
   const members = new Set(partition.members.map(String))
@@ -267,11 +294,12 @@ export function compilePartition(prompt, partition, options = {}) {
     remote[memberId] = clone(local[memberId])
   }
 
-  // Residency and assets are checked before boundary bridging: a partition
-  // blocked for on-prem-only assets, or for a model this ComfyUI cannot
-  // identify, must fail on that, not on an incidental type error.
+  // Residency, assets and node packs are checked before boundary bridging: a
+  // partition blocked for on-prem-only assets, or for a model or node type this
+  // ComfyUI cannot identify, must fail on that, not on an incidental type error.
   const tainted = checkResidency(local, members, onPremPatterns, onPremNodes, residencyClass)
   const assets = partitionAssets(partition, assetManifest)
+  const requiredPacks = partitionNodePacks(partition, nodePacks)
 
   for (const memberId of members) {
     const node = remote[memberId]
@@ -339,6 +367,10 @@ export function compilePartition(prompt, partition, options = {}) {
     // available: the coordinator's behaviour for a manifest-less job is exactly
     // what it was before declared assets existed.
     ...(assets ? { assets } : {}),
+    // Omitted when the box needs only core node types, and when no report was
+    // available: the coordinator's behaviour for a job without node_packs is
+    // exactly what it was before node pack requirements existed.
+    ...(requiredPacks ? { node_packs: requiredPacks } : {}),
     workflow: remote,
     inputs,
     outputs: outputs.map(({ extract_id, ...item }) => item),
