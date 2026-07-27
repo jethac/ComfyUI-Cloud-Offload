@@ -73,6 +73,20 @@ schemas, unsafe ZIP names, duplicate members, undeclared members, oversized
 manifests, excessive nesting, and unsupported runtime values. Artifact identity
 is the SHA-256 digest of the complete bundle.
 
+## Declared assets
+
+A compiled job may carry `assets`: the model files its subgraph references, each
+as `{category, filename, sha256, size, format}`. The list is produced inside
+ComfyUI (`POST /cloud_offload/assets`), not in the browser, because only the
+server process can map a widget string to a file in `folder_paths` and hash it.
+
+Classification is closed-world. A string that looks like a model file but
+matches no category blocks compilation, naming the node and the value: an
+incomplete manifest is worse than none, because it converts an honest
+post-provision failure into a green light followed by a paid failure. If the
+route itself is unreachable the compiler stamps no `assets` at all, and the job
+behaves as it did before declared assets existed.
+
 ## Coordinator flow
 
 The local gateway uploads input bundles to authenticated coordinator artifact
