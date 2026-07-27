@@ -83,6 +83,66 @@ async function fetchOnPremPatterns() {
   }
 }
 
+// The declared asset manifest comes from this ComfyUI, not the coordinator:
+// only the server process can map a widget string to a model file and hash it.
+// Cached briefly and keyed by the box's own inputs, because a compile pass that
+// changed nothing must not rehash the same weights.
+//
+// This fetch fails open like the on-prem one — an unreachable route logs and
+// queues without a manifest — but for a different reason. The *contents* of a
+// manifest we did receive fail closed: an unknown asset blocks in the compiler.
+// Failing open here is safe only because a manifest-less job stamps no assets,
+// and the coordinator treats such a job exactly as it did before this feature
+// existed: the runner gets its worker profile's static `weights` list and
+// nothing else. Bricking every queue when the route is missing (an older node
+// pack, a mid-upgrade reload) would be a worse trade than that fallback.
+const ASSET_MANIFEST_CACHE_MS = 30 * 1000
+const assetManifestCache = new Map()
+
+function assetManifestKey(prompt, partition) {
+  return JSON.stringify([
+    partition.partition_id,
+    partition.members.map((nodeId) => prompt[String(nodeId)]?.inputs ?? null),
+  ])
+}
+
+async function fetchAssetManifests(prompt, partitions) {
+  const manifests = {}
+  const now = Date.now()
+  for (const [key, entry] of assetManifestCache) {
+    if (now - entry.at >= ASSET_MANIFEST_CACHE_MS) assetManifestCache.delete(key)
+  }
+  for (const partition of partitions) {
+    const key = assetManifestKey(prompt, partition)
+    const cached = assetManifestCache.get(key)
+    if (cached) {
+      manifests[partition.partition_id] = cached.manifest
+      continue
+    }
+    try {
+      const response = await api.fetchApi("/cloud_offload/assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, member_ids: partition.members.map(String) }),
+      })
+      if (!response.ok) throw new Error(`assets ${response.status}`)
+      const payload = await response.json()
+      const manifest = {
+        assets: Array.isArray(payload.assets) ? payload.assets : [],
+        unknown: Array.isArray(payload.unknown) ? payload.unknown : [],
+      }
+      assetManifestCache.set(key, { at: now, manifest })
+      manifests[partition.partition_id] = manifest
+    } catch (error) {
+      console.warn(
+        "Cloud Offload: asset manifest unavailable; queueing without declared assets",
+        error
+      )
+    }
+  }
+  return manifests
+}
+
 // Providers are discovered from the coordinator so plugin-registered connectors
 // appear without shipping a new node pack. The dialog stays usable if the
 // coordinator is unreachable: "Auto" is always present.
@@ -363,6 +423,7 @@ app.registerExtension({
       if (!partitions.length) return result
       const compiled = compilePartitions(result.output, partitions, {
         onPremPatterns: await fetchOnPremPatterns(),
+        assetManifest: await fetchAssetManifests(result.output, partitions),
       })
       result.output = compiled.prompt
       result.workflow.extra ||= {}

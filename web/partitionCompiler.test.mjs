@@ -145,6 +145,66 @@ test("does not block when taint exists elsewhere but never reaches the partition
   assert.equal(result.remoteSpec.residency, undefined)
 })
 
+// === Declared asset manifest ===
+
+const CHECKPOINT = {
+  category: "checkpoints",
+  filename: "sd_xl_base_1.0.safetensors",
+  sha256: "a".repeat(64),
+  size: 6938040714,
+  format: "safetensors",
+}
+
+test("stamps the declared assets of the partition being compiled", () => {
+  const { prompt, partition } = fixture()
+  const result = compilePartition(prompt, partition, {
+    assetManifest: {
+      "partition-one": { assets: [CHECKPOINT], unknown: [] },
+      "other-box": { assets: [{ ...CHECKPOINT, filename: "elsewhere.safetensors" }] },
+    },
+  })
+
+  assert.deepEqual(result.remoteSpec.assets, [CHECKPOINT])
+  // Stamped by value: later edits to the manifest cannot rewrite a compiled job.
+  assert.notEqual(result.remoteSpec.assets[0], CHECKPOINT)
+})
+
+test("omits assets when the box references no model files", () => {
+  const { prompt, partition } = fixture()
+  const result = compilePartition(prompt, partition, {
+    assetManifest: { "partition-one": { assets: [], unknown: [] } },
+  })
+
+  assert.equal("assets" in result.remoteSpec, false)
+})
+
+test("blocks a partition referencing a model this ComfyUI cannot identify", () => {
+  const { prompt, partition } = fixture()
+  assert.throws(
+    () =>
+      compilePartitions(prompt, [partition], {
+        assetManifest: {
+          "partition-one": {
+            assets: [CHECKPOINT],
+            unknown: [
+              { node_id: "2", input_name: "ckpt_name", value: "StudioX_Hero.safetensors" },
+            ],
+          },
+        },
+      }),
+    /Partition references "StudioX_Hero\.safetensors" \(node 2\), which is not a known model file on this ComfyUI\. Cloud Offload cannot guarantee the runner has it — install it locally or remove the node from the box\./
+  )
+})
+
+test("compiles unchanged when no manifest is available", () => {
+  const { prompt, partition } = fixture()
+  const withoutManifest = compilePartition(prompt, partition)
+  const withEmptyManifest = compilePartition(prompt, partition, { assetManifest: {} })
+
+  assert.equal("assets" in withoutManifest.remoteSpec, false)
+  assert.deepEqual(withEmptyManifest.remoteSpec, withoutManifest.remoteSpec)
+})
+
 test("stamps residency on the job spec when an on-prem backend takes the partition", () => {
   const { prompt, partition } = fixture()
   prompt["1"].inputs.image = "nda_plate.png"

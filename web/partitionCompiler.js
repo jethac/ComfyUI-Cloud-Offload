@@ -140,8 +140,33 @@ function checkResidency(prompt, members, onPremPatterns, residencyClass) {
   return true
 }
 
+// The declared asset manifest is server-side truth: this file runs in the
+// browser, where folder_paths is unreachable and a 7GB checkpoint cannot be
+// hashed. POST /cloud_offload/assets does that work and returns, per box, the
+// model files it references plus anything this ComfyUI could not identify.
+// Keyed by partition_id because one compile pass carries every box in the graph.
+//
+// An unknown asset blocks: shipping a partial manifest would turn an honest
+// post-provision failure into a green light followed by a paid one. A missing
+// manifest does not block — see cloudOffloadPartitions.js for that seam.
+function partitionAssets(partition, assetManifest) {
+  const manifest = assetManifest?.[partition.partition_id]
+  if (!manifest) return null
+  const unknown = manifest.unknown || []
+  if (unknown.length) {
+    const { value, node_id } = unknown[0]
+    throw new Error(
+      `Partition references "${value}" (node ${node_id}), which is not a known ` +
+      `model file on this ComfyUI. Cloud Offload cannot guarantee the runner has it — ` +
+      `install it locally or remove the node from the box.`
+    )
+  }
+  const assets = manifest.assets || []
+  return assets.length ? clone(assets) : null
+}
+
 export function compilePartition(prompt, partition, options = {}) {
-  const { onPremPatterns = [], residencyClass = "cloud" } = options
+  const { onPremPatterns = [], residencyClass = "cloud", assetManifest = null } = options
   const local = clone(prompt)
   const members = new Set(partition.members.map(String))
   const prefix = `__comfy_${safeId(partition.partition_id)}`
@@ -162,9 +187,11 @@ export function compilePartition(prompt, partition, options = {}) {
     remote[memberId] = clone(local[memberId])
   }
 
-  // Residency is checked before boundary bridging: a partition blocked for
-  // on-prem-only assets must fail on that, not on an incidental type error.
+  // Residency and assets are checked before boundary bridging: a partition
+  // blocked for on-prem-only assets, or for a model this ComfyUI cannot
+  // identify, must fail on that, not on an incidental type error.
   const tainted = checkResidency(local, members, onPremPatterns, residencyClass)
+  const assets = partitionAssets(partition, assetManifest)
 
   for (const memberId of members) {
     const node = remote[memberId]
@@ -228,6 +255,10 @@ export function compilePartition(prompt, partition, options = {}) {
     // Only stamped when tainted: the coordinator refuses "on-prem" jobs at
     // cloud backends, so the field is the compiled form of the taint analysis.
     ...(tainted ? { residency: "on-prem" } : {}),
+    // Omitted when the box references no model files, and when no manifest was
+    // available: the coordinator's behaviour for a manifest-less job is exactly
+    // what it was before declared assets existed.
+    ...(assets ? { assets } : {}),
     workflow: remote,
     inputs,
     outputs: outputs.map(({ extract_id, ...item }) => item),
