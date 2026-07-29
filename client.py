@@ -294,6 +294,14 @@ class CloudOffloadClient:
         """Read secret-free prepared-storage policy, volume health and benefit."""
         return self._json("GET", "/api/cache/status", timeout=15)
 
+    def set_cache_s3_credentials(
+        self, credentials: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Write the dedicated RunPod S3 pair to the coordinator keychain."""
+        return self._json(
+            "POST", "/api/cache/s3-credentials", payload=credentials, timeout=30
+        )
+
     def create_or_adopt_cache_volume(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Perform one explicitly confirmed managed create or volume adoption."""
         return self._json(

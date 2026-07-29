@@ -489,6 +489,21 @@ export function openProviderManager() {
     </fieldset>
     <div data-prepared-storage></div>
     <fieldset style="border:1px solid #3a3f55;border-radius:8px;padding:12px;margin:0 0 12px">
+      <legend style="padding:0 6px;opacity:.85">RunPod S3 access</legend>
+      <div style="opacity:.68;font-size:12px;line-height:1.4;margin-bottom:8px">A dedicated S3 API key lets the coordinator prepopulate and replicate network volumes without renting a GPU. Both values are stored in the OS keychain and never shown again.</div>
+      ${field("Access key", "RunPod S3 access key, usually beginning with user_.")}
+        <input data-s3-access type="password" placeholder="paste access key" autocomplete="off" />
+      </label>
+      ${field("Secret key", "The one-time RunPod S3 secret, usually beginning with rps_.")}
+        <input data-s3-secret type="password" placeholder="paste secret key" autocomplete="off" />
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <button type="button" data-action="save-s3-credentials">Save S3 key pair</button>
+        <span data-s3-status style="font-size:12px;opacity:.85"></span>
+        <span data-s3-result style="font-size:12px;opacity:.8"></span>
+      </div>
+    </fieldset>
+    <fieldset style="border:1px solid #3a3f55;border-radius:8px;padding:12px;margin:0 0 12px">
       <legend style="padding:0 6px;opacity:.85">Hugging Face token</legend>
       ${field("Access token", "Rented workers use it to download gated profile weights; public repos need none. Stored by the coordinator, never shown again. Prefer a fine-grained read-only token — a pod's environment is visible to the provider account.")}
         <input data-hf-token type="password" placeholder="paste token" autocomplete="off" />
@@ -520,6 +535,10 @@ export function openProviderManager() {
   const rateInput = panel.querySelector("[data-max-rate]")
   const ingressSelect = panel.querySelector("[data-ingress]")
   const onPremRows = panel.querySelector("[data-on-prem-rows]")
+  const s3AccessInput = panel.querySelector("[data-s3-access]")
+  const s3SecretInput = panel.querySelector("[data-s3-secret]")
+  const s3Status = panel.querySelector("[data-s3-status]")
+  const s3Result = panel.querySelector("[data-s3-result]")
 
   // One row per policy entry. The scope lives in a dropdown rather than a line
   // of text so a scoped entry can never be flattened into an unparseable string.
@@ -593,6 +612,44 @@ export function openProviderManager() {
       policyResult.textContent = "Coordinator unreachable"
       policyResult.style.color = "#d8747f"
     })
+  api.fetchApi("/cloud_offload/cache/status")
+    .then(async (response) => {
+      const payload = await response.json().catch(() => ({}))
+      s3Status.textContent = payload.s3_credentials_configured
+        ? "Configured"
+        : "Not configured"
+      s3Status.style.color = payload.s3_credentials_configured ? "#5fbf7f" : "#d5a75f"
+    })
+    .catch(() => {
+      s3Status.textContent = "Status unavailable"
+    })
+  panel.querySelector('[data-action="save-s3-credentials"]').addEventListener("click", async () => {
+    const accessKey = s3AccessInput.value.trim()
+    const secretKey = s3SecretInput.value.trim()
+    if (!accessKey || !secretKey) {
+      s3Result.textContent = "Paste both values"
+      s3Result.style.color = "#d8747f"
+      return
+    }
+    try {
+      const response = await api.fetchApi("/cloud_offload/cache/s3-credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_key: accessKey, secret_key: secretKey }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`)
+      s3AccessInput.value = ""
+      s3SecretInput.value = ""
+      s3Status.textContent = "Configured"
+      s3Status.style.color = "#5fbf7f"
+      s3Result.textContent = "Saved"
+      s3Result.style.color = "#5fbf7f"
+    } catch (error) {
+      s3Result.textContent = String(error.message || error)
+      s3Result.style.color = "#d8747f"
+    }
+  })
   panel.querySelector('[data-action="save-hf-token"]').addEventListener("click", async () => {
     const token = hfInput.value.trim()
     if (!token) {
@@ -712,6 +769,15 @@ app.registerExtension({
       label: "Cloud Offload: Manage providers",
       icon: "pi pi-cloud-upload",
       function: openProviderManager,
+    },
+  ],
+
+  actionBarButtons: [
+    {
+      icon: "pi pi-cloud-upload",
+      label: "Cloud Offload",
+      tooltip: "Manage Cloud Offload providers and prepared storage",
+      onClick: openProviderManager,
     },
   ],
 
