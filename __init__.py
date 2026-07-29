@@ -91,6 +91,27 @@ def _register_routes() -> None:
         # settings. The coordinator rejects secret fields itself.
         return await _proxy(client.update_config, await _read_body(request))
 
+    @PromptServer.instance.routes.post(
+        "/cloud_offload/confirmations/{confirmation_id}"
+    )
+    async def cloud_offload_resolve_confirmation(request):
+        if __package__:
+            from .confirmation import ConfirmationError, confirmation_broker
+        else:
+            from confirmation import ConfirmationError, confirmation_broker
+
+        try:
+            accepted = confirmation_broker.resolve(
+                request.match_info["confirmation_id"], await _read_body(request)
+            )
+        except ConfirmationError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if not accepted:
+            return web.json_response(
+                {"error": "Rental confirmation is no longer active"}, status=404
+            )
+        return web.json_response({"accepted": True})
+
     @PromptServer.instance.routes.get("/cloud_offload/cache/status")
     async def cloud_offload_cache_status(request):
         return await _proxy(client.cache_status)

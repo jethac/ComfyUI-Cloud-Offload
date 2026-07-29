@@ -42,6 +42,19 @@ PROVIDER_CACHE_SECONDS = 30
 class CloudOffloadError(RuntimeError):
     """Raised when the Cloud Offload coordinator is unavailable or rejects a request."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+        status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+        self.status = status
+
 
 def _url_port(url: str) -> int | None:
     parsed = urllib.parse.urlparse(url)
@@ -246,10 +259,15 @@ class CloudOffloadClient:
                 return json.loads(body) if body else {}
         except urllib.error.HTTPError as exc:
             detail = exc.reason
+            error_code = None
+            error_details: Dict[str, Any] = {}
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
                 error = payload.get("error", {})
                 detail = error.get("message") or payload.get("detail", detail)
+                error_code = error.get("code")
+                if isinstance(error.get("details"), dict):
+                    error_details = error["details"]
                 # The coordinator puts actionable lists (provider spec problems,
                 # for one) in details rather than the message; carry them across
                 # so the caller can show what actually went wrong.
@@ -258,7 +276,12 @@ class CloudOffloadClient:
                     detail = f"{detail}: " + "; ".join(str(item) for item in problems)
             except Exception:
                 pass
-            raise CloudOffloadError(f"Cloud Offload coordinator error: {detail}") from exc
+            raise CloudOffloadError(
+                f"Cloud Offload coordinator error: {detail}",
+                code=error_code,
+                details=error_details,
+                status=exc.code,
+            ) from exc
         except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
             reason = getattr(exc, "reason", exc)
             raise CloudOffloadError(
@@ -429,6 +452,9 @@ class CloudOffloadClient:
     def submit_partition(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._json("POST", "/api/partitions", payload=payload, timeout=30)
 
+    def preflight_partition(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json("POST", "/api/preflight", payload=payload, timeout=120)
+
     # -- Artifacts -------------------------------------------------------
 
     def upload_partition_artifact(self, path: str | Path) -> Dict[str, Any]:
@@ -539,6 +565,7 @@ class CloudOffloadClient:
         timeout_seconds: int = 3600,
         progress_callback: Any | None = None,
         cancellation_event: threading.Event | None = None,
+        confirmation_callback: Any | None = None,
     ) -> Dict[str, Any]:
         """Serialize inputs, execute a compiled partition, and restore outputs."""
         try:
@@ -546,6 +573,9 @@ class CloudOffloadClient:
         except ImportError:
             from partition_protocol import dump_bundle, load_bundle
 
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise CloudOffloadError("Cloud partition was cancelled before rental")
+        _throw_if_processing_interrupted()
         with tempfile.TemporaryDirectory(prefix="cloud-offload-partition-") as temporary:
             root = Path(temporary)
             input_artifacts: Dict[str, str] = {}
@@ -554,14 +584,141 @@ class CloudOffloadClient:
                 dump_bundle(value, path)
                 uploaded = self.upload_partition_artifact(path)
                 input_artifacts[boundary_key] = uploaded["artifact_id"]
-            job = self.submit_partition(
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise CloudOffloadError("Cloud partition was cancelled before rental")
+            _throw_if_processing_interrupted()
+            if progress_callback is not None:
+                progress_callback(
+                    {"type": "preflight_started", "overall_progress": 0}
+                )
+            report = self.preflight_partition(
                 {
                     "partition": partition,
                     "input_artifacts": input_artifacts,
                     "provider": provider,
-                    "timeout_seconds": int(timeout_seconds),
                 }
             )
+            while True:
+                state = str(report.get("status") or "")
+                if state not in {"ready", "ready_with_preparation"}:
+                    issues = report.get("blockers") or report.get("unknowns") or []
+                    messages = [
+                        str(item.get("message") or item.get("code") or "")
+                        for item in issues
+                        if isinstance(item, dict)
+                    ]
+                    detail = "; ".join(item for item in messages if item)
+                    raise CloudOffloadError(
+                        "Cloud Offload preflight is not ready"
+                        + (f": {detail}" if detail else "")
+                    )
+                recommendation = report.get("recommendation") or {}
+                candidate_id = str(recommendation.get("candidate_id") or "")
+                confirmation = report.get("confirmation") or {}
+                needs_decision = bool(confirmation.get("required")) or not candidate_id
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "type": "preflight_ready",
+                            "overall_progress": 0,
+                            "candidate_count": len(report.get("candidates") or []),
+                            "confirmation_required": needs_decision,
+                        }
+                    )
+                if needs_decision:
+                    if confirmation_callback is None:
+                        raise CloudOffloadError(
+                            "Cloud Offload rental confirmation requires an active browser"
+                        )
+                    decision = confirmation_callback(report)
+                else:
+                    decision = {
+                        "action": "policy_skip",
+                        "candidate_id": candidate_id,
+                        "dont_show_again": False,
+                    }
+                if str(decision.get("action") or "") == "cancel":
+                    raise CloudOffloadError(
+                        "Cloud partition was cancelled before GPU rental"
+                    )
+                candidate_id = str(decision.get("candidate_id") or candidate_id)
+                valid_candidates = {
+                    str(item.get("candidate_id") or "")
+                    for item in report.get("candidates") or []
+                }
+                if not candidate_id or candidate_id not in valid_candidates:
+                    raise CloudOffloadError(
+                        "The selected GPU is not in the current preflight report"
+                    )
+                submit_payload = {
+                    "partition": partition,
+                    "input_artifacts": input_artifacts,
+                    "provider": provider,
+                    "timeout_seconds": int(timeout_seconds),
+                    "preflight_id": report["preflight_id"],
+                    "manifest_digest": report["manifest_digest"],
+                    "candidate_id": candidate_id,
+                    "confirmation_action": str(
+                        decision.get("action") or "policy_skip"
+                    ),
+                }
+                revised_report = None
+                while True:
+                    if cancellation_event is not None and cancellation_event.is_set():
+                        raise CloudOffloadError(
+                            "Cloud partition was cancelled before GPU rental"
+                        )
+                    _throw_if_processing_interrupted()
+                    try:
+                        job = self.submit_partition(submit_payload)
+                        break
+                    except CloudOffloadError as exc:
+                        revised = exc.details.get("revised_preflight")
+                        if (
+                            exc.code == "cloud_offload.preflight_changed"
+                            and isinstance(revised, dict)
+                        ):
+                            revised_report = revised
+                            if progress_callback is not None:
+                                progress_callback(
+                                    {
+                                        "type": "preflight_changed",
+                                        "overall_progress": 0,
+                                        "changes": exc.details.get("changes") or [],
+                                    }
+                                )
+                            break
+                        if exc.code == "cloud_offload.confirmation_countdown_active":
+                            remaining = max(
+                                1,
+                                int(exc.details.get("remaining_seconds") or 1),
+                            )
+                            wait_seconds = min(remaining, 5)
+                            if cancellation_event is not None:
+                                if cancellation_event.wait(wait_seconds):
+                                    raise CloudOffloadError(
+                                        "Cloud partition was cancelled before GPU rental"
+                                    ) from exc
+                            else:
+                                time.sleep(wait_seconds)
+                            continue
+                        raise
+                if revised_report is not None:
+                    report = revised_report
+                    continue
+                if decision.get("dont_show_again"):
+                    try:
+                        self.update_config({"rental_confirmation": "never"})
+                    except CloudOffloadError as exc:
+                        if progress_callback is not None:
+                            progress_callback(
+                                {
+                                    "type": "confirmation_setting_failed",
+                                    "overall_progress": 0,
+                                    "error": str(exc),
+                                }
+                            )
+                break
             job_id = job["job_id"]
             deadline = time.monotonic() + int(timeout_seconds)
             event_cursor = 0
