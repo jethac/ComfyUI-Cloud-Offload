@@ -91,6 +91,45 @@ def _register_routes() -> None:
         # settings. The coordinator rejects secret fields itself.
         return await _proxy(client.update_config, await _read_body(request))
 
+    @PromptServer.instance.routes.get("/cloud_offload/cache/status")
+    async def cloud_offload_cache_status(request):
+        return await _proxy(client.cache_status)
+
+    @PromptServer.instance.routes.post("/cloud_offload/cache/volumes")
+    async def cloud_offload_cache_volume(request):
+        return await _proxy(
+            client.create_or_adopt_cache_volume, await _read_body(request)
+        )
+
+    @PromptServer.instance.routes.post(
+        "/cloud_offload/cache/volumes/{volume_id}/verify"
+    )
+    async def cloud_offload_verify_cache_volume(request):
+        return await _proxy(
+            client.verify_cache_volume, request.match_info["volume_id"]
+        )
+
+    @PromptServer.instance.routes.delete(
+        "/cloud_offload/cache/volumes/{volume_id}"
+    )
+    async def cloud_offload_delete_cache_volume(request):
+        delete_provider = str(request.query.get("delete_provider") or "").lower() in {
+            "1", "true", "yes",
+        }
+        confirmation = request.query.get("confirm_provider_volume_id")
+        import asyncio
+
+        try:
+            payload = await asyncio.to_thread(
+                client.delete_cache_volume,
+                request.match_info["volume_id"],
+                delete_provider=delete_provider,
+                confirm_provider_volume_id=confirmation,
+            )
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        return web.json_response(payload)
+
     # Declarative provider specs. Registered before the generic
     # ``{provider}/{action}`` route below, which would otherwise swallow
     # ``POST /cloud_offload/providers/specs/validate`` as provider="specs".
