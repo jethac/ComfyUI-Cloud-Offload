@@ -291,3 +291,36 @@ def test_build_manifest_reports_a_listed_file_that_is_gone(tmp_path: Path, monke
             "reason": "listed under checkpoints but missing on disk",
         }
     ]
+
+
+def test_remote_assets_resolve_missing_models_from_workflow_metadata():
+    unknown = [
+        {"node_id": "70:32", "input_name": "model_name", "value": "moge.safetensors"}
+    ]
+    sources = [
+        {
+            "name": "moge.safetensors",
+            "directory": "geometry_estimation",
+            "url": "https://huggingface.co/org/repo/resolve/main/models/moge.safetensors",
+        }
+    ]
+    expected = {
+        "category": "geometry_estimation",
+        "filename": "moge.safetensors",
+        "sha256": "a" * 64,
+        "size": 123,
+        "format": "safetensors",
+    }
+
+    assets, unresolved = asset_manifest.remote_assets(
+        unknown, sources, resolver=lambda _source: expected
+    )
+
+    assert assets == [expected]
+    assert unresolved == []
+
+
+def test_parse_huggingface_url_pins_repo_revision_and_path():
+    assert asset_manifest.parse_huggingface_url(
+        "https://huggingface.co/Comfy-Org/MoGe/resolve/main/geometry/moge.safetensors"
+    ) == ("Comfy-Org/MoGe", "main", "geometry/moge.safetensors")

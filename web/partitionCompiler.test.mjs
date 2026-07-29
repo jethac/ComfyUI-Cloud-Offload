@@ -4,11 +4,47 @@ import test from "node:test"
 import {
   compilePartition,
   compilePartitions,
+  expandPartitionMembers,
   findTaintedNodes,
   globMatch,
   mergeNodeMarks,
   propagateTaint,
 } from "./partitionCompiler.js"
+
+test("expands boxed subgraphs to the executable prompt nodes", () => {
+  const innerNode = (id, inputType, outputType) => ({
+    id,
+    inputs: [{ name: "value", type: inputType }],
+    node: { outputs: [{ type: outputType }] },
+  })
+  const wrapper = {
+    id: 70,
+    inputs: [{ name: "source", type: "IMAGE" }],
+    outputs: [{ type: "IMAGE" }],
+    getInnerNodes() {
+      return [innerNode("70:13", "IMAGE", "MOGE_GEOMETRY"), innerNode("70:25", "MOGE_GEOMETRY", "IMAGE")]
+    },
+  }
+  const normal = {
+    id: 71,
+    inputs: [{ name: "image", type: "IMAGE" }],
+    outputs: [{ type: "MASK" }],
+  }
+  const prompt = {
+    "70:13": { class_type: "MoGeInference", inputs: {} },
+    "70:25": { class_type: "MoGeRender", inputs: { value: ["70:13", 0] } },
+    "71": { class_type: "ImageColorToMask", inputs: { image: ["70:25", 0] } },
+  }
+
+  assert.deepEqual(expandPartitionMembers(prompt, [wrapper, normal]), {
+    members: ["70:13", "70:25", "71"],
+    type_map: {
+      "70:13": { inputs: { value: "IMAGE" }, outputs: ["MOGE_GEOMETRY"] },
+      "70:25": { inputs: { value: "MOGE_GEOMETRY" }, outputs: ["IMAGE"] },
+      "71": { inputs: { image: "IMAGE" }, outputs: ["MASK"] },
+    },
+  })
+})
 
 function fixture(type = "IMAGE") {
   return {
