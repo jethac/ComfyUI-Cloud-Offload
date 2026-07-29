@@ -490,8 +490,11 @@ export function openProviderManager() {
           <option value="manual">Manual choice</option>
         </select>
       </label>
-      ${field("Max estimated total job cost (USD)", "Optional hard limit. Leave empty for no separate total-cost limit; the hourly limit still applies.")}
+      ${field("Max total job cost (USD)", "Optional hard limit. When paid elapsed time reaches this amount, Cloud Offload cancels the job and removes the exact GPU resource. Leave empty for no separate dollar limit.")}
         <input data-max-total-cost type="number" min="0" step="0.01" placeholder="no separate limit" style="width:160px" />
+      </label>
+      ${field("Max paid runtime (minutes)", "Hard limit for one rented GPU resource. Cloud Offload cancels work and removes the exact resource when this time ends.")}
+        <input data-max-runtime type="number" min="1" max="1440" step="1" style="width:120px" />
       </label>
       ${field("Allowed regions", "Optional comma-separated hard allowlist, for example US-MD-1, EU-RO-1.")}
         <input data-allowed-regions type="text" placeholder="all compatible regions" style="width:100%" />
@@ -572,6 +575,7 @@ export function openProviderManager() {
   const confirmationCountdown = panel.querySelector("[data-confirmation-countdown]")
   const recommendationPolicy = panel.querySelector("[data-recommendation-policy]")
   const maxTotalCost = panel.querySelector("[data-max-total-cost]")
+  const maxRuntime = panel.querySelector("[data-max-runtime]")
   const allowedRegions = panel.querySelector("[data-allowed-regions]")
   const providerOrder = panel.querySelector("[data-provider-order]")
   const materialPrice = panel.querySelector("[data-material-price]")
@@ -648,6 +652,7 @@ export function openProviderManager() {
       confirmationCountdown.value = Number(cloud.confirmation_countdown_seconds ?? 10)
       recommendationPolicy.value = cloud.recommendation_policy || "balanced"
       maxTotalCost.value = cloud.max_total_job_cost == null ? "" : cloud.max_total_job_cost
+      maxRuntime.value = Math.max(1, Math.round(Number(cloud.max_job_runtime_seconds ?? 7200) / 60))
       allowedRegions.value = Array.isArray(cloud.allowed_regions) ? cloud.allowed_regions.join(", ") : ""
       providerOrder.value = Array.isArray(cloud.provider_order) ? cloud.provider_order.join(", ") : ""
       materialPrice.value = Number(cloud.material_price_change_percent ?? 5)
@@ -729,6 +734,7 @@ export function openProviderManager() {
     const onPremAssets = readOnPremRows()
     const countdown = Number(confirmationCountdown.value)
     const totalCost = maxTotalCost.value.trim() === "" ? null : Number(maxTotalCost.value)
+    const runtimeMinutes = Number(maxRuntime.value)
     const priceTolerance = Number(materialPrice.value)
     const costTolerance = Number(materialCost.value)
     if (!Number.isInteger(countdown) || countdown < 0 || countdown > 60) {
@@ -738,6 +744,11 @@ export function openProviderManager() {
     }
     if (totalCost != null && (!Number.isFinite(totalCost) || totalCost <= 0)) {
       policyResult.textContent = "Enter a positive total cost or leave it empty"
+      policyResult.style.color = "#d8747f"
+      return
+    }
+    if (!Number.isInteger(runtimeMinutes) || runtimeMinutes < 1 || runtimeMinutes > 1440) {
+      policyResult.textContent = "Paid runtime must be from 1 to 1440 minutes"
       policyResult.style.color = "#d8747f"
       return
     }
@@ -756,6 +767,7 @@ export function openProviderManager() {
         body: JSON.stringify({
           max_hourly_rate: value,
           max_total_job_cost: totalCost,
+          max_job_runtime_seconds: runtimeMinutes * 60,
           recommendation_policy: recommendationPolicy.value,
           rental_confirmation: rentalConfirmation.value,
           confirmation_countdown_seconds: countdown,

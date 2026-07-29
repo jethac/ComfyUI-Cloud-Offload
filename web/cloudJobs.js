@@ -155,6 +155,7 @@ function jobCard(raw) {
     ["GPU", view.gpu],
     ["Region", view.region],
     ["Pod", view.podId],
+    ["Resource lease", view.leaseId],
     ["Prepared volume", view.volumeId],
     ["Hourly rate", view.hourly],
     ["Expected total", view.expectedCost],
@@ -163,6 +164,7 @@ function jobCard(raw) {
     ["Cache", view.cache],
     ["Preparation", view.preparation],
     ["Preflight", view.preflight],
+    ["Provider closure", view.closure],
   ]) {
     grid.append(fact(label, value))
   }

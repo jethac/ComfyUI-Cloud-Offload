@@ -149,6 +149,7 @@ export function jobView(job = {}) {
     gpu,
     region,
     podId: resource.pod_id ? String(resource.pod_id) : "Not allocated",
+    leaseId: resource.lease_id ? String(resource.lease_id) : "Not allocated",
     volumeId: resource.volume_id ? String(resource.volume_id) : "Not mounted",
     hourly: number(cost.hourly_rate_usd) === null
       ? "Hourly rate is unknown"
@@ -171,6 +172,9 @@ export function jobView(job = {}) {
         )} history samples`
       : "Preflight details are not available",
     billing: billingLabel(job.billing),
+    closure: job.billing?.termination_confirmed
+      ? `Provider confirmed${job.billing.termination_confirmed_at ? ` · ${job.billing.termination_confirmed_at}` : ""}`
+      : "Provider closure is not confirmed",
     canCancel: Boolean(job.cancellation?.can_cancel),
     cancellationRequested: Boolean(job.cancellation?.requested),
     terminal: Boolean(job.terminal),
