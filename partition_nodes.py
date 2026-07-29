@@ -15,6 +15,7 @@ from comfy_api.latest import ComfyExtension, io
 
 try:
     from .client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client
+    from .confirmation import ConfirmationError, confirmation_broker
     from .partition_protocol import (
         ARTIFACT_MARKER,
         dump_bundle,
@@ -23,6 +24,7 @@ try:
     )
 except ImportError:
     from client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client
+    from confirmation import ConfirmationError, confirmation_broker
     from partition_protocol import ARTIFACT_MARKER, dump_bundle, load_bundle, validate_boundary_type
 
 
@@ -125,6 +127,36 @@ class CloudPartitionGateway(io.ComfyNode):
                 )
 
         cancellation_event = threading.Event()
+
+        def confirm_rental(report: dict[str, Any]) -> dict[str, Any]:
+            if PromptServer is None:
+                raise CloudOffloadError(
+                    "Rental confirmation requires an active ComfyUI browser"
+                )
+            confirmation_id = confirmation_broker.open(
+                report, str(partition.get("partition_id") or "")
+            )
+            server = PromptServer.instance
+            try:
+                server.send_sync(
+                    "cloud_offload.confirmation",
+                    {
+                        "confirmation_id": confirmation_id,
+                        "partition_id": partition.get("partition_id"),
+                        "report": report,
+                    },
+                    server.client_id,
+                )
+                return confirmation_broker.wait(
+                    confirmation_id,
+                    cancellation_event=cancellation_event,
+                    timeout_seconds=300,
+                )
+            except ConfirmationError as exc:
+                raise CloudOffloadError(str(exc)) from exc
+            finally:
+                confirmation_broker.discard(confirmation_id)
+
         try:
             result = await asyncio.to_thread(
                 client.run_comfyui_partition,
@@ -134,6 +166,7 @@ class CloudPartitionGateway(io.ComfyNode):
                 timeout_seconds=int(timeout_seconds),
                 progress_callback=report,
                 cancellation_event=cancellation_event,
+                confirmation_callback=confirm_rental,
             )
         except asyncio.CancelledError:
             cancellation_event.set()

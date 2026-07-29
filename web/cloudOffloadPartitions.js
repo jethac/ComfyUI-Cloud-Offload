@@ -3,6 +3,7 @@ import { api } from "/scripts/api.js"
 import { compilePartitions, expandPartitionMembers } from "./partitionCompiler.js"
 import { formatBalance } from "./providerBalance.js"
 import { partitionProgressStatus } from "./progressFeedback.js"
+import { handleRentalConfirmation } from "./rentalConfirmation.js"
 import {
   SETTING_GPU_TYPE,
   SETTING_KEEP_WARM,
@@ -549,6 +550,7 @@ app.registerExtension({
   },
   async setup() {
     api.addEventListener("comfy.partition.progress", handlePartitionEvent)
+    api.addEventListener("cloud_offload.confirmation", handleRentalConfirmation)
     const original = app.graphToPrompt.bind(app)
     app.graphToPrompt = async function (...args) {
       const result = await original(...args)

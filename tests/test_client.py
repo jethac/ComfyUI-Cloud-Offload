@@ -151,6 +151,35 @@ def test_run_workflow_raises_on_failed_job(monkeypatch):
         c.run_comfyui_workflow({"workflow": {"1": {}}})
 
 
+def preflight_report(*, required=False, mandatory=False):
+    candidate = {
+        "candidate_id": "candidate-1",
+        "provider": "runpod",
+        "gpu_type": "L40",
+        "hourly_rate": 0.75,
+        "estimate": {"total_job_cost_usd": [0.05, 0.10]},
+        "preparation": {"coverage_percent": 100, "missing_bytes": 0},
+    }
+    return {
+        "schema": "cloud-offload.preflight.v1",
+        "preflight_id": "preflight-1",
+        "manifest_digest": "sha256:" + "d" * 64,
+        "status": "ready",
+        "recommendation": {
+            "candidate_id": candidate["candidate_id"],
+            "rationale": ["Best expected result."],
+        },
+        "candidates": [candidate],
+        "confirmation": {
+            "policy": "always" if required else "never",
+            "required": required,
+            "mandatory": mandatory,
+            "countdown_seconds": 10,
+        },
+        "unknowns": [],
+    }
+
+
 def test_partition_is_submitted_as_the_real_comfy_subgraph(monkeypatch):
     c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
     submitted = []
@@ -160,6 +189,7 @@ def test_partition_is_submitted_as_the_real_comfy_subgraph(monkeypatch):
     monkeypatch.setattr(
         c, "submit_partition", lambda payload: submitted.append(payload) or {"job_id": "job-1"}
     )
+    monkeypatch.setattr(c, "preflight_partition", lambda payload: preflight_report(required=True))
     monkeypatch.setattr(
         c,
         "job_status",
@@ -191,17 +221,30 @@ def test_partition_is_submitted_as_the_real_comfy_subgraph(monkeypatch):
         ],
     }
 
-    result = c.run_comfyui_partition(partition, {"input_0000": 7}, provider="runpod")
+    result = c.run_comfyui_partition(
+        partition,
+        {"input_0000": 7},
+        provider="runpod",
+        confirmation_callback=lambda report: {
+            "action": "start_now",
+            "candidate_id": "candidate-1",
+            "dont_show_again": False,
+        },
+    )
 
     assert result["job_id"] == "job-1"
     assert submitted[0]["provider"] == "runpod"
     assert submitted[0]["input_artifacts"]["input_0000"] == "a" * 64
     assert submitted[0]["partition"]["runner"]["profile"] == "comfyui-partition-v1"
     assert submitted[0]["partition"]["schema"] == "comfy.partition.job.v1"
+    assert submitted[0]["preflight_id"] == "preflight-1"
+    assert submitted[0]["candidate_id"] == "candidate-1"
+    assert submitted[0]["confirmation_action"] == "start_now"
 
 
 def test_partition_raises_on_failed_job(monkeypatch):
     c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    monkeypatch.setattr(c, "preflight_partition", lambda payload: preflight_report())
     monkeypatch.setattr(c, "submit_partition", lambda payload: {"job_id": "job-1"})
     monkeypatch.setattr(
         c, "job_status", lambda job_id: {"status": "failed", "error": "boom"}
@@ -222,11 +265,19 @@ def test_partition_raises_on_failed_job(monkeypatch):
 def test_partition_cancels_when_comfyui_interrupts(monkeypatch):
     c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
     cancelled = []
+    checks = iter([None, None, None, RuntimeError("interrupted")])
+    monkeypatch.setattr(c, "preflight_partition", lambda payload: preflight_report())
     monkeypatch.setattr(c, "submit_partition", lambda payload: {"job_id": "job-1"})
+
+    def interrupt_check():
+        value = next(checks)
+        if isinstance(value, Exception):
+            raise value
+
     monkeypatch.setattr(
         client_module,
         "_throw_if_processing_interrupted",
-        lambda: (_ for _ in ()).throw(RuntimeError("interrupted")),
+        interrupt_check,
     )
     monkeypatch.setattr(
         c, "cancel_job", lambda job_id: cancelled.append(job_id) or {"status": "cancelled"}
@@ -266,7 +317,160 @@ def test_partition_cancels_when_async_caller_signals_cancellation(monkeypatch):
             provider="runpod",
             cancellation_event=cancellation_event,
         )
-    assert cancelled == ["job-1"]
+    assert cancelled == []
+
+
+def test_material_change_opens_a_new_mandatory_confirmation(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    initial = preflight_report(required=True)
+    revised = preflight_report(required=True, mandatory=True)
+    revised["preflight_id"] = "preflight-2"
+    reports = []
+    submissions = []
+    monkeypatch.setattr(c, "preflight_partition", lambda payload: initial)
+
+    def submit(payload):
+        submissions.append(payload)
+        if len(submissions) == 1:
+            raise CloudOffloadError(
+                "changed",
+                code="cloud_offload.preflight_changed",
+                details={"changes": ["hourly_rate"], "revised_preflight": revised},
+                status=409,
+            )
+        return {"job_id": "job-1"}
+
+    monkeypatch.setattr(c, "submit_partition", submit)
+    monkeypatch.setattr(
+        c,
+        "job_status",
+        lambda job_id: {"status": "completed", "result": {"output_artifacts": {}}},
+    )
+    monkeypatch.setattr(c, "job_events", lambda *args, **kwargs: {"events": []})
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+
+    result = c.run_comfyui_partition(
+        {
+            "schema": "comfy.partition.job.v1",
+            "partition_id": "p",
+            "workflow": {},
+            "outputs": [],
+        },
+        {},
+        confirmation_callback=lambda report: reports.append(report["preflight_id"])
+        or {
+            "action": "start_now",
+            "candidate_id": "candidate-1",
+            "dont_show_again": False,
+        },
+    )
+
+    assert result["job_id"] == "job-1"
+    assert reports == ["preflight-1", "preflight-2"]
+    assert [item["preflight_id"] for item in submissions] == [
+        "preflight-1",
+        "preflight-2",
+    ]
+
+
+def test_dont_show_again_is_saved_after_the_paid_job_is_accepted(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    order = []
+    monkeypatch.setattr(c, "preflight_partition", lambda payload: preflight_report(required=True))
+    monkeypatch.setattr(
+        c, "submit_partition", lambda payload: order.append("submit") or {"job_id": "job-1"}
+    )
+    monkeypatch.setattr(
+        c,
+        "update_config",
+        lambda payload: order.append(("config", payload)) or {"status": "updated"},
+    )
+    monkeypatch.setattr(
+        c,
+        "job_status",
+        lambda job_id: {"status": "completed", "result": {"output_artifacts": {}}},
+    )
+    monkeypatch.setattr(c, "job_events", lambda *args, **kwargs: {"events": []})
+
+    c.run_comfyui_partition(
+        {
+            "schema": "comfy.partition.job.v1",
+            "partition_id": "p",
+            "workflow": {},
+            "outputs": [],
+        },
+        {},
+        confirmation_callback=lambda report: {
+            "action": "start_now",
+            "candidate_id": "candidate-1",
+            "dont_show_again": True,
+        },
+    )
+
+    assert order == ["submit", ("config", {"rental_confirmation": "never"})]
+
+
+def test_countdown_wait_honors_cancellation_before_retry(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    attempts = []
+
+    class CancelsDuringWait:
+        cancelled = False
+
+        def is_set(self):
+            return self.cancelled
+
+        def wait(self, timeout):
+            self.cancelled = True
+            return True
+
+    monkeypatch.setattr(c, "preflight_partition", lambda payload: preflight_report())
+    monkeypatch.setattr(client_module, "_throw_if_processing_interrupted", lambda: None)
+
+    def submit(payload):
+        attempts.append(payload)
+        raise CloudOffloadError(
+            "countdown active",
+            code="cloud_offload.confirmation_countdown_active",
+            details={"remaining_seconds": 10},
+            status=409,
+        )
+
+    monkeypatch.setattr(c, "submit_partition", submit)
+
+    with pytest.raises(CloudOffloadError, match="cancelled before GPU rental"):
+        c.run_comfyui_partition(
+            {
+                "schema": "comfy.partition.job.v1",
+                "partition_id": "p",
+                "workflow": {},
+                "outputs": [],
+            },
+            {},
+            cancellation_event=CancelsDuringWait(),
+        )
+
+    assert len(attempts) == 1
+
+
+def test_required_confirmation_without_a_browser_creates_no_job(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    submitted = []
+    monkeypatch.setattr(c, "preflight_partition", lambda payload: preflight_report(required=True))
+    monkeypatch.setattr(c, "submit_partition", lambda payload: submitted.append(payload))
+
+    with pytest.raises(CloudOffloadError, match="requires an active browser"):
+        c.run_comfyui_partition(
+            {
+                "schema": "comfy.partition.job.v1",
+                "partition_id": "p",
+                "workflow": {},
+                "outputs": [],
+            },
+            {},
+        )
+
+    assert submitted == []
 
 
 # -- Nodes --------------------------------------------------------------------

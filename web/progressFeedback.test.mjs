@@ -3,6 +3,21 @@ import test from "node:test"
 
 import { partitionProgressStatus, progressFormatters } from "./progressFeedback.js"
 
+test("shows preflight and confirmation state before provider launch", () => {
+  assert.equal(
+    partitionProgressStatus({ type: "preflight_started" }),
+    "checking workflow and GPU options",
+  )
+  assert.equal(
+    partitionProgressStatus({ type: "preflight_ready", confirmation_required: true }),
+    "waiting for rental confirmation",
+  )
+  assert.equal(
+    partitionProgressStatus({ type: "preflight_changed" }),
+    "GPU plan changed · confirm again",
+  )
+})
+
 test("long runner startup reports an elapsed plain-language stage", () => {
   assert.equal(
     partitionProgressStatus({ type: "runner_starting_progress", elapsed_seconds: 75 }),

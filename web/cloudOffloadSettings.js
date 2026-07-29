@@ -5,9 +5,9 @@ import { formatBalance } from "./providerBalance.js"
 import { mountPreparedStorage } from "./preparedStorage.js"
 import { api } from "/scripts/api.js"
 
-// Cloud Offload preferences live in ComfyUI's own settings store, following the
-// upstream extension convention (typed `settings` entries, dot-notation ids that
-// categorize automatically, read/write through app.extensionManager.setting).
+// Per-box defaults live in ComfyUI's own settings store, following the upstream
+// extension convention. Global rental, cost, residency, and provider policy
+// lives in the coordinator so every browser and launch uses the same limits.
 //
 // Deliberate exception: provider API keys are NOT settings. ComfyUI persists
 // settings to a plaintext comfy.settings.json that users export and share, so
@@ -464,14 +464,49 @@ export function openProviderManager() {
     "position:fixed;inset:0;z-index:10000;background:#0008;display:grid;place-items:center"
   const panel = document.createElement("div")
   panel.style.cssText =
-    "width:min(560px,calc(100vw - 32px));max-height:82vh;overflow:auto;padding:20px;border:1px solid #5368d8;border-radius:10px;background:#1b1d27;color:#eee;font:14px sans-serif;box-shadow:0 18px 60px #000a"
-  panel.innerHTML = `<h2 style="margin:0 0 4px;font-size:18px">Cloud Offload providers</h2>
+    "width:min(620px,calc(100vw - 32px));max-height:82vh;overflow:auto;padding:20px;border:1px solid #5368d8;border-radius:10px;background:#1b1d27;color:#eee;font:14px sans-serif;box-shadow:0 18px 60px #000a"
+  panel.innerHTML = `<h2 style="margin:0 0 4px;font-size:18px">Cloud Offload settings</h2>
     <div style="opacity:.65;margin-bottom:12px;line-height:1.4">Credentials are sent to the coordinator and stored outside ComfyUI's settings file. Install additional providers as connector plugins.</div>
     <fieldset style="border:1px solid #3a3f55;border-radius:8px;padding:12px;margin:0 0 12px">
       <legend style="padding:0 6px;opacity:.85">Coordinator policy</legend>
       ${field("Max hourly rate (USD)", "The dispatcher never rents a GPU above this. Applies to every box.")}
         <input data-max-rate type="number" min="0" step="0.05" style="width:120px" />
       </label>
+      ${field("Rental confirmation", "Always shows the short rental confirmation by default. Material changes still interrupt automatic launch when normal confirmation is hidden.")}
+        <select data-rental-confirmation>
+          <option value="always">Always</option>
+          <option value="material_changes">Only material changes</option>
+          <option value="never">Never for normal plans</option>
+        </select>
+      </label>
+      ${field("Confirmation countdown (seconds)", "The default is 10 seconds. Start now remains available.")}
+        <input data-confirmation-countdown type="number" min="0" max="60" step="1" style="width:120px" />
+      </label>
+      ${field("GPU recommendation", "Balanced is the default. Manual requires a GPU choice before launch.")}
+        <select data-recommendation-policy>
+          <option value="balanced">Balanced</option>
+          <option value="cheapest">Cheapest total job</option>
+          <option value="fastest">Fastest result</option>
+          <option value="manual">Manual choice</option>
+        </select>
+      </label>
+      ${field("Max estimated total job cost (USD)", "Optional hard limit. Leave empty for no separate total-cost limit; the hourly limit still applies.")}
+        <input data-max-total-cost type="number" min="0" step="0.01" placeholder="no separate limit" style="width:160px" />
+      </label>
+      ${field("Allowed regions", "Optional comma-separated hard allowlist, for example US-MD-1, EU-RO-1.")}
+        <input data-allowed-regions type="text" placeholder="all compatible regions" style="width:100%" />
+      </label>
+      ${field("Preferred and allowed providers", "Comma-separated provider order. Only configured providers in this list can be recommended automatically.")}
+        <input data-provider-order type="text" placeholder="runpod, vast.ai" style="width:100%" />
+      </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${field("Material price change (%)", "A larger change restarts confirmation.")}
+          <input data-material-price type="number" min="0" max="100" step="0.5" style="width:100px" />
+        </label>
+        ${field("Material total-cost change (%)", "A larger estimated cost change restarts confirmation.")}
+          <input data-material-cost type="number" min="0" max="100" step="0.5" style="width:100px" />
+        </label>
+      </div>
       ${field("Public ingress", "How a rented worker reaches this coordinator. Auto opens a Cloudflare tunnel so you never paste a URL; it exposes the coordinator publicly, protected by the required access token.")}
         <select data-ingress>
           <option value="none">Manual — I set a coordinator URL myself</option>
@@ -533,6 +568,14 @@ export function openProviderManager() {
   // Coordinator policy: the hourly-rate ceiling is server state, not a
   // per-browser setting, so it is read from and written to the coordinator.
   const rateInput = panel.querySelector("[data-max-rate]")
+  const rentalConfirmation = panel.querySelector("[data-rental-confirmation]")
+  const confirmationCountdown = panel.querySelector("[data-confirmation-countdown]")
+  const recommendationPolicy = panel.querySelector("[data-recommendation-policy]")
+  const maxTotalCost = panel.querySelector("[data-max-total-cost]")
+  const allowedRegions = panel.querySelector("[data-allowed-regions]")
+  const providerOrder = panel.querySelector("[data-provider-order]")
+  const materialPrice = panel.querySelector("[data-material-price]")
+  const materialCost = panel.querySelector("[data-material-cost]")
   const ingressSelect = panel.querySelector("[data-ingress]")
   const onPremRows = panel.querySelector("[data-on-prem-rows]")
   const s3AccessInput = panel.querySelector("[data-s3-access]")
@@ -601,6 +644,14 @@ export function openProviderManager() {
     .then((payload) => {
       const cloud = payload.cloud || payload
       if (typeof cloud.max_hourly_rate === "number") rateInput.value = cloud.max_hourly_rate
+      rentalConfirmation.value = cloud.rental_confirmation || "always"
+      confirmationCountdown.value = Number(cloud.confirmation_countdown_seconds ?? 10)
+      recommendationPolicy.value = cloud.recommendation_policy || "balanced"
+      maxTotalCost.value = cloud.max_total_job_cost == null ? "" : cloud.max_total_job_cost
+      allowedRegions.value = Array.isArray(cloud.allowed_regions) ? cloud.allowed_regions.join(", ") : ""
+      providerOrder.value = Array.isArray(cloud.provider_order) ? cloud.provider_order.join(", ") : ""
+      materialPrice.value = Number(cloud.material_price_change_percent ?? 5)
+      materialCost.value = Number(cloud.material_cost_change_percent ?? 10)
       if (cloud.ingress) ingressSelect.value = cloud.ingress
       if (Array.isArray(cloud.on_prem_assets)) {
         onPremRows.replaceChildren()
@@ -676,12 +727,42 @@ export function openProviderManager() {
       return
     }
     const onPremAssets = readOnPremRows()
+    const countdown = Number(confirmationCountdown.value)
+    const totalCost = maxTotalCost.value.trim() === "" ? null : Number(maxTotalCost.value)
+    const priceTolerance = Number(materialPrice.value)
+    const costTolerance = Number(materialCost.value)
+    if (!Number.isInteger(countdown) || countdown < 0 || countdown > 60) {
+      policyResult.textContent = "Countdown must be from 0 to 60 seconds"
+      policyResult.style.color = "#d8747f"
+      return
+    }
+    if (totalCost != null && (!Number.isFinite(totalCost) || totalCost <= 0)) {
+      policyResult.textContent = "Enter a positive total cost or leave it empty"
+      policyResult.style.color = "#d8747f"
+      return
+    }
+    if (
+      !Number.isFinite(priceTolerance) || priceTolerance < 0 || priceTolerance > 100 ||
+      !Number.isFinite(costTolerance) || costTolerance < 0 || costTolerance > 100
+    ) {
+      policyResult.textContent = "Material change values must be from 0 to 100%"
+      policyResult.style.color = "#d8747f"
+      return
+    }
     try {
       const response = await api.fetchApi("/cloud_offload/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           max_hourly_rate: value,
+          max_total_job_cost: totalCost,
+          recommendation_policy: recommendationPolicy.value,
+          rental_confirmation: rentalConfirmation.value,
+          confirmation_countdown_seconds: countdown,
+          allowed_regions: allowedRegions.value.split(",").map((item) => item.trim()).filter(Boolean),
+          provider_order: providerOrder.value.split(",").map((item) => item.trim()).filter(Boolean),
+          material_price_change_percent: priceTolerance,
+          material_cost_change_percent: costTolerance,
           ingress: ingressSelect.value,
           on_prem_assets: onPremAssets,
         }),
@@ -766,7 +847,7 @@ app.registerExtension({
   commands: [
     {
       id: "CloudOffload.ManageProviders",
-      label: "Cloud Offload: Manage providers",
+      label: "Cloud Offload: Settings and providers",
       icon: "pi pi-cloud-upload",
       function: openProviderManager,
     },
@@ -776,7 +857,7 @@ app.registerExtension({
     {
       icon: "pi pi-cloud-upload",
       label: "Cloud Offload",
-      tooltip: "Manage Cloud Offload providers and prepared storage",
+      tooltip: "Manage rental confirmation, cost limits, providers, and prepared storage",
       onClick: openProviderManager,
     },
   ],

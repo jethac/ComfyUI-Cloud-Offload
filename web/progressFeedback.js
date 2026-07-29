@@ -29,6 +29,14 @@ export function partitionProgressStatus(event = {}) {
   const elapsed = event.elapsed_seconds != null ? ` · ${duration(event.elapsed_seconds)}` : ""
   const file = shortFile(event.file)
   switch (event.type) {
+    case "preflight_started":
+      return "checking workflow and GPU options"
+    case "preflight_ready":
+      return event.confirmation_required ? "waiting for rental confirmation" : "GPU plan confirmed"
+    case "preflight_changed":
+      return "GPU plan changed · confirm again"
+    case "confirmation_setting_failed":
+      return "started · could not save confirmation setting"
     case "provider_request_started":
       return "requesting GPU"
     case "provider_request_progress":

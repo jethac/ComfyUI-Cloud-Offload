@@ -87,6 +87,25 @@ runner is model-agnostic: a pinned ComfyUI plus the partition bridge nodes, so
 any node installed in that image can ride inside the box and report normal
 node-level progress.
 
+### GPU recommendation and rental confirmation
+
+After the gateway uploads the final boundary artifacts, it runs free preflight
+before it submits paid work. The default confirmation shows the recommended
+provider, GPU, region, hourly price, estimated total-cost and time ranges,
+prepared-cache coverage, rationale, confidence, and meaningful uncertainty.
+It starts automatically after the server-controlled ten-second countdown.
+
+The panel also provides **Start now**, **Cancel**, **Choose another GPU**, and
+**Don't show this confirmation again**. Opening details or changing the GPU
+pauses automatic start. A material price, cost, capacity, region, or storage
+change always opens a new mandatory confirmation. The coordinator enforces the
+countdown, so no paid job can start early from the browser.
+
+Use the **Cloud Offload** action-bar button to restore confirmation or change
+the countdown, recommendation policy, hard hourly and total-cost limits,
+allowed regions, or material-change tolerances. Hiding normal confirmation
+does not disable these hard limits or mandatory change notices.
+
 ## Example
 
 ```text
