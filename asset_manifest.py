@@ -18,8 +18,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -204,8 +206,99 @@ def digest_file(path: str | Path, cache: dict[str, dict[str, Any]]) -> str:
     return sha256
 
 
+def _huggingface_token() -> str | None:
+    token = os.environ.get("HF_TOKEN", "").strip()
+    if token:
+        return token
+    token = os.environ.get("CLOUD_OFFLOAD_HUGGINGFACE_API_KEY", "").strip()
+    if token:
+        return token
+    try:
+        import keyring
+
+        return keyring.get_password("cloud-offload", "huggingface") or None
+    except Exception:
+        return None
+
+
+def parse_huggingface_url(url: str) -> tuple[str, str, str]:
+    """Return ``(repo_id, revision, filename)`` for a Hub resolve URL."""
+    parsed = urlparse(str(url))
+    parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
+    if parsed.hostname not in {"huggingface.co", "www.huggingface.co"}:
+        raise ValueError("model source is not a huggingface.co URL")
+    if len(parts) < 5 or parts[2] != "resolve":
+        raise ValueError("model source is not a Hugging Face resolve URL")
+    return "/".join(parts[:2]), parts[3], "/".join(parts[4:])
+
+
+def resolve_huggingface_source(source: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a workflow model URL to its immutable Hub identity."""
+    import huggingface_hub
+
+    repo_id, revision, filename = parse_huggingface_url(source["url"])
+    info = huggingface_hub.HfApi(token=_huggingface_token()).model_info(
+        repo_id, revision=revision, files_metadata=True
+    )
+    sibling = next(
+        (item for item in info.siblings if item.rfilename == filename), None
+    )
+    lfs = getattr(sibling, "lfs", None)
+    sha256 = getattr(lfs, "sha256", None)
+    size = getattr(lfs, "size", None)
+    if not sibling or not sha256 or size is None:
+        raise ValueError(f"{filename} has no LFS sha256 metadata")
+    return {
+        "category": str(source["directory"]),
+        "filename": str(source["name"]),
+        "sha256": str(sha256),
+        "size": int(size),
+        "format": asset_format(str(source["name"])),
+    }
+
+
+def remote_assets(
+    unknown: Iterable[dict[str, Any]],
+    model_sources: Iterable[dict[str, Any]],
+    resolver=resolve_huggingface_source,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Resolve missing local models that carry downloadable workflow metadata."""
+    catalog = {
+        _normalize(source.get("name", "")): source
+        for source in model_sources or ()
+        if isinstance(source, dict)
+        and source.get("name")
+        and source.get("url")
+        and source.get("directory")
+    }
+    assets: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    resolved: dict[str, dict[str, Any]] = {}
+    introduced: set[tuple[str, str]] = set()
+    for entry in unknown:
+        source = catalog.get(_normalize(entry.get("value", "")))
+        if not source:
+            unresolved.append(entry)
+            continue
+        key = str(source["url"])
+        try:
+            if key not in resolved:
+                resolved[key] = resolver(source)
+            asset = resolved[key]
+        except Exception as exc:
+            unresolved.append({**entry, "reason": f"model source metadata unavailable: {exc}"})
+            continue
+        identity = (asset["category"], _normalize(asset["filename"]))
+        if identity not in introduced:
+            introduced.add(identity)
+            assets.append(dict(asset))
+    return assets, unresolved
+
+
 def build_manifest(
-    prompt: dict[str, Any], member_ids: Iterable[Any]
+    prompt: dict[str, Any],
+    member_ids: Iterable[Any],
+    model_sources: Iterable[dict[str, Any]] = (),
 ) -> dict[str, list[dict[str, Any]]]:
     """Classify, resolve and digest every model file a boxed subgraph declares.
 
@@ -228,7 +321,8 @@ def build_manifest(
     cache = load_digest_cache()
     snapshot = dict(cache)
     assets: list[dict[str, Any]] = []
-    unknown: list[dict[str, Any]] = list(classified["unknown"])
+    remote, unknown = remote_assets(classified["unknown"], model_sources)
+    assets.extend(remote)
 
     for entry in classified["assets"]:
         category = entry["category"]

@@ -161,13 +161,16 @@ def _register_routes() -> None:
         body = await _read_body(request)
         prompt = body.get("prompt")
         member_ids = body.get("member_ids")
+        model_sources = body.get("model_sources") or []
         if not isinstance(prompt, dict) or not isinstance(member_ids, list):
             return web.json_response(
                 {"error": "A prompt object and a member_ids list are required"},
                 status=400,
             )
         try:
-            payload = await asyncio.to_thread(build_manifest, prompt, member_ids)
+            payload = await asyncio.to_thread(
+                build_manifest, prompt, member_ids, model_sources
+            )
         except Exception as exc:
             # 500, not the 502 the proxy routes use: the failure is this
             # process's, and the compiler treats any error as "no manifest".

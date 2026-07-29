@@ -1,6 +1,6 @@
 import { app } from "/scripts/app.js"
 import { api } from "/scripts/api.js"
-import { compilePartitions } from "./partitionCompiler.js"
+import { compilePartitions, expandPartitionMembers } from "./partitionCompiler.js"
 import { formatBalance } from "./providerBalance.js"
 import {
   SETTING_GPU_TYPE,
@@ -140,7 +140,7 @@ function readNodePacks(payload) {
   }
 }
 
-async function fetchPartitionRequirements(prompt, partitions) {
+async function fetchPartitionRequirements(prompt, partitions, modelSources) {
   const assetManifest = {}
   const nodePacks = {}
   const now = Date.now()
@@ -155,7 +155,11 @@ async function fetchPartitionRequirements(prompt, partitions) {
         const response = await api.fetchApi("/cloud_offload/assets", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, member_ids: partition.members.map(String) }),
+          body: JSON.stringify({
+            prompt,
+            member_ids: partition.members.map(String),
+            model_sources: modelSources,
+          }),
         })
         if (!response.ok) throw new Error(`assets ${response.status}`)
         const payload = await response.json()
@@ -452,18 +456,28 @@ function collectOnPremNodes(graph) {
   return marks
 }
 
-function typeMapFor(nodes) {
-  const result = {}
-  for (const node of nodes) {
-    result[String(node.id)] = {
-      inputs: Object.fromEntries((node.inputs || []).map((slot) => [slot.name, slot.type])),
-      outputs: (node.outputs || []).map((slot) => slot.type),
+function collectModelSources(workflow) {
+  const sources = []
+  const seen = new Set()
+  const nodeLists = [
+    workflow?.nodes,
+    ...(workflow?.definitions?.subgraphs || []).map((definition) => definition?.nodes),
+  ]
+  for (const nodes of nodeLists) {
+    for (const node of nodes || []) {
+      for (const source of node?.properties?.models || []) {
+        if (!source?.name || !source?.url || !source?.directory) continue
+        const key = `${source.directory}\n${source.name}\n${source.url}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        sources.push({ name: source.name, url: source.url, directory: source.directory })
+      }
     }
   }
-  return result
+  return sources
 }
 
-function collectPartitions(graph) {
+function collectPartitions(graph, prompt) {
   const partitions = []
   for (const group of graph?._groups || graph?.groups || []) {
     const settings = group?.flags?.[FLAG]
@@ -479,11 +493,12 @@ function collectPartitions(graph) {
       settings.base_title = settings.base_title.replace("☁ Kao Cloud", "☁ Cloud Offload")
     }
     settings.profile = PROFILE
+    const expanded = expandPartitionMembers(prompt, nodes)
     partitions.push({
       ...settings,
       title: group.title,
-      members: nodes.map((node) => String(node.id)),
-      type_map: typeMapFor(nodes),
+      members: expanded.members,
+      type_map: expanded.type_map,
     })
   }
   return partitions
@@ -531,9 +546,13 @@ app.registerExtension({
     app.graphToPrompt = async function (...args) {
       const result = await original(...args)
       const graph = args[0] || app.graph
-      const partitions = collectPartitions(graph)
+      const partitions = collectPartitions(graph, result.output)
       if (!partitions.length) return result
-      const requirements = await fetchPartitionRequirements(result.output, partitions)
+      const requirements = await fetchPartitionRequirements(
+        result.output,
+        partitions,
+        collectModelSources(result.workflow),
+      )
       const compiled = compilePartitions(result.output, partitions, {
         onPremPatterns: await fetchOnPremPatterns(),
         onPremNodes: collectOnPremNodes(graph),

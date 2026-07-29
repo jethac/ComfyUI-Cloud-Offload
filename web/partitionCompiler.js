@@ -47,6 +47,43 @@ function nodeOutputType(typeMap, nodeId, outputIndex) {
   return typeMap[String(nodeId)]?.outputs?.[outputIndex] || "*"
 }
 
+function nodeTypeMap(node) {
+  const source = node.node || node
+  return {
+    inputs: Object.fromEntries((node.inputs || source.inputs || []).map((slot) => [slot.name, slot.type])),
+    outputs: (source.outputs || []).map((slot) => slot.type),
+  }
+}
+
+// ComfyUI flattens a boxed subgraph before producing the API prompt. The
+// visible wrapper node 70, for example, becomes executable nodes 70:13,
+// 70:25, and so on. Expand only wrappers that are absent from the prompt;
+// ordinary nodes keep their existing missing-node error behavior.
+export function expandPartitionMembers(prompt, nodes) {
+  const members = []
+  const type_map = {}
+  for (const node of nodes) {
+    const nodeId = String(node.id)
+    let executable = [node]
+    if (!prompt[nodeId] && typeof node.getInnerNodes === "function") {
+      executable = node.getInnerNodes(new Map())
+    }
+    let matched = false
+    for (const innerNode of executable) {
+      const innerId = String(innerNode.id)
+      if (!prompt[innerId]) continue
+      matched = true
+      members.push(innerId)
+      type_map[innerId] = nodeTypeMap(innerNode)
+    }
+    if (!matched) {
+      members.push(nodeId)
+      type_map[nodeId] = nodeTypeMap(node)
+    }
+  }
+  return { members, type_map }
+}
+
 // Case-insensitive fnmatch-style glob: `*` matches any run of characters
 // (including none), `?` matches exactly one. Anchored to the whole string, so
 // a pattern without wildcards is an exact (case-folded) match.
