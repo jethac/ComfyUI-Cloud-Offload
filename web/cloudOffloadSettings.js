@@ -2,6 +2,7 @@ import { app } from "/scripts/app.js"
 
 import { ON_PREM_SCOPES, parseOnPremEntries, serializeOnPremEntries } from "./onPremPolicy.js"
 import { formatBalance } from "./providerBalance.js"
+import { mountPreparedStorage } from "./preparedStorage.js"
 import { api } from "/scripts/api.js"
 
 // Cloud Offload preferences live in ComfyUI's own settings store, following the
@@ -486,6 +487,7 @@ export function openProviderManager() {
         <span data-policy-result style="font-size:12px;opacity:.8"></span>
       </div>
     </fieldset>
+    <div data-prepared-storage></div>
     <fieldset style="border:1px solid #3a3f55;border-radius:8px;padding:12px;margin:0 0 12px">
       <legend style="padding:0 6px;opacity:.85">Hugging Face token</legend>
       ${field("Access token", "Rented workers use it to download gated profile weights; public repos need none. Stored by the coordinator, never shown again. Prefer a fine-grained read-only token — a pod's environment is visible to the provider account.")}
@@ -507,6 +509,10 @@ export function openProviderManager() {
   panel.querySelector('[data-action="close"]').addEventListener("click", close)
   overlay.addEventListener("pointerdown", (event) => {
     if (event.target === overlay) close()
+  })
+
+  mountPreparedStorage(panel.querySelector("[data-prepared-storage]"), {
+    fetchApi: (...args) => api.fetchApi(...args),
   })
 
   // Coordinator policy: the hourly-rate ceiling is server state, not a

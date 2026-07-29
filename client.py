@@ -288,6 +288,46 @@ class CloudOffloadClient:
         """
         return self._json("POST", "/api/config", payload=updates, timeout=15)
 
+    # -- Durable prepared-state storage ---------------------------------
+
+    def cache_status(self) -> Dict[str, Any]:
+        """Read secret-free prepared-storage policy, volume health and benefit."""
+        return self._json("GET", "/api/cache/status", timeout=15)
+
+    def create_or_adopt_cache_volume(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Perform one explicitly confirmed managed create or volume adoption."""
+        return self._json(
+            "POST", "/api/cache/volumes", payload=request, timeout=60
+        )
+
+    def verify_cache_volume(self, volume_id: str) -> Dict[str, Any]:
+        encoded = urllib.parse.quote(str(volume_id), safe="")
+        return self._json(
+            "POST", f"/api/cache/volumes/{encoded}/verify", payload={}, timeout=60
+        )
+
+    def delete_cache_volume(
+        self,
+        volume_id: str,
+        *,
+        delete_provider: bool = False,
+        confirm_provider_volume_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        encoded = urllib.parse.quote(str(volume_id), safe="")
+        query = urllib.parse.urlencode(
+            {
+                "delete_provider": str(bool(delete_provider)).lower(),
+                **(
+                    {"confirm_provider_volume_id": confirm_provider_volume_id}
+                    if confirm_provider_volume_id is not None
+                    else {}
+                ),
+            }
+        )
+        return self._json(
+            "DELETE", f"/api/cache/volumes/{encoded}?{query}", timeout=60
+        )
+
     def provider_action(
         self, provider: str, action: str, payload: Dict[str, Any] | None = None
     ) -> Dict[str, Any]:

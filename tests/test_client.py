@@ -566,3 +566,57 @@ def test_config_client_round_trips_on_prem_asset_patterns(monkeypatch):
         ("GET", "/api/config", None),
         ("POST", "/api/config", {"on_prem_assets": ["studiox_*.safetensors", "nda_*"]}),
     ]
+
+
+def test_prepared_storage_client_maps_status_lifecycle_and_safe_deletion(monkeypatch):
+    calls = []
+
+    def fake_json(self, method, path, payload=None, **kwargs):
+        calls.append((method, path, payload, kwargs.get("timeout")))
+        return {"ok": True}
+
+    monkeypatch.setattr(client_module.CloudOffloadClient, "_json", fake_json)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    instance.cache_status()
+    instance.create_or_adopt_cache_volume(
+        {
+            "operation": "adopt",
+            "provider_volume_id": "vol-existing",
+            "confirmed": True,
+        }
+    )
+    instance.verify_cache_volume("volume/one")
+    instance.delete_cache_volume("volume/one")
+    instance.delete_cache_volume(
+        "volume/one",
+        delete_provider=True,
+        confirm_provider_volume_id="vol id/one",
+    )
+
+    assert calls == [
+        ("GET", "/api/cache/status", None, 15),
+        (
+            "POST",
+            "/api/cache/volumes",
+            {
+                "operation": "adopt",
+                "provider_volume_id": "vol-existing",
+                "confirmed": True,
+            },
+            60,
+        ),
+        ("POST", "/api/cache/volumes/volume%2Fone/verify", {}, 60),
+        (
+            "DELETE",
+            "/api/cache/volumes/volume%2Fone?delete_provider=false",
+            None,
+            60,
+        ),
+        (
+            "DELETE",
+            "/api/cache/volumes/volume%2Fone?delete_provider=true&confirm_provider_volume_id=vol+id%2Fone",
+            None,
+            60,
+        ),
+    ]
