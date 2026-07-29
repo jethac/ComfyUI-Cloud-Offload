@@ -5,6 +5,9 @@ from __future__ import annotations
 import base64
 import io
 import json
+import tempfile
+import threading
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -12,8 +15,10 @@ from PIL import Image
 
 try:
     from .client import CloudOffloadError, client
+    from .confirmation import ConfirmationError, confirmation_broker
 except ImportError:
     from client import CloudOffloadError, client
+    from confirmation import ConfirmationError, confirmation_broker
 
 
 def _image_to_b64(image) -> str:
@@ -30,6 +35,14 @@ def _decode_image_tensor(value: Optional[str]):
     import torch
 
     image = Image.open(io.BytesIO(base64.b64decode(value))).convert("RGB")
+    data = np.array(image).astype(np.float32) / 255.0
+    return torch.from_numpy(data).unsqueeze(0)
+
+
+def _decode_image_bytes(value: bytes):
+    import torch
+
+    image = Image.open(io.BytesIO(value)).convert("RGB")
     data = np.array(image).astype(np.float32) / 255.0
     return torch.from_numpy(data).unsqueeze(0)
 
@@ -94,16 +107,88 @@ class CloudWorkflow:
         if not isinstance(workflow, dict) or not workflow:
             raise CloudOffloadError("API workflow JSON must be a non-empty object")
         inputs = {input_filename: _image_to_b64(image)} if image is not None else {}
+        try:
+            from comfy.utils import ProgressBar
+            from server import PromptServer
+        except ImportError:  # pragma: no cover - only possible outside ComfyUI
+            ProgressBar = None
+            PromptServer = None
+        progress_bar = ProgressBar(100) if ProgressBar is not None else None
+        cancellation_event = threading.Event()
+
+        def report(event: dict[str, Any]) -> None:
+            overall = event.get("overall_progress")
+            if progress_bar is not None and overall is not None:
+                progress_bar.update_absolute(max(0, min(100, int(overall))), 100)
+            if PromptServer is not None:
+                server = PromptServer.instance
+                server.send_sync(
+                    "comfy.workflow.progress",
+                    {"event": event},
+                    server.client_id,
+                )
+
+        def confirm_rental(report: dict[str, Any]) -> dict[str, Any]:
+            if PromptServer is None:
+                raise CloudOffloadError(
+                    "Rental confirmation requires an active ComfyUI browser"
+                )
+            workload_id = str(report.get("capsule_digest") or "workflow")
+            confirmation_id = confirmation_broker.open(report, workload_id)
+            server = PromptServer.instance
+            try:
+                server.send_sync(
+                    "cloud_offload.confirmation",
+                    {
+                        "confirmation_id": confirmation_id,
+                        "partition_id": workload_id,
+                        "report": report,
+                    },
+                    server.client_id,
+                )
+                return confirmation_broker.wait(
+                    confirmation_id,
+                    cancellation_event=cancellation_event,
+                    timeout_seconds=300,
+                )
+            except ConfirmationError as exc:
+                raise CloudOffloadError(str(exc)) from exc
+            finally:
+                confirmation_broker.discard(confirmation_id)
+
         result = client.run_comfyui_workflow(
             {
                 "workflow": workflow,
                 "inputs": inputs,
                 "provider": provider,
                 "timeout_seconds": int(timeout_seconds),
-            }
+            },
+            progress_callback=report,
+            cancellation_event=cancellation_event,
+            confirmation_callback=confirm_rental,
         )
+        first_image = None
+        image_artifact = next(
+            (
+                item
+                for item in result.get("artifacts") or []
+                if item.get("output_kind") == "image"
+                or str(item.get("mime_type") or "").startswith("image/")
+            ),
+            None,
+        )
+        if image_artifact:
+            with tempfile.TemporaryDirectory(
+                prefix="cloud-offload-workflow-result-"
+            ) as temporary:
+                path = client.download_partition_artifact(
+                    str(image_artifact["artifact_id"]),
+                    Path(temporary) / "image.artifact",
+                )
+                first_image = _decode_image_bytes(path.read_bytes())
         images = result.get("images") or []
-        first_image = _decode_image_tensor(images[0].get("data")) if images else None
+        if first_image is None and images:
+            first_image = _decode_image_tensor(images[0].get("data"))
         if first_image is None:
             import torch
 

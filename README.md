@@ -58,7 +58,7 @@ authoritative availability check; discovery does not health-gate every call.
 | Node | Category | Description |
 |------|----------|-------------|
 | **Cloud Status** | `Cloud Offload` | Show queue counts, active workers, and RunPod/Vast.ai balances as JSON |
-| **Cloud Workflow** | `Cloud Offload` | Submit a whole API-format ComfyUI workflow to a cloud runner and return its first image + result JSON |
+| **Cloud Workflow** | `Cloud Offload` | Preflight and confirm a whole API-format ComfyUI workflow, then return its first image and artifact result JSON |
 
 The four partition **bridge** nodes are compiler-generated and hidden
 (`is_dev_only`); users never place them by hand. They live under
@@ -105,6 +105,12 @@ Use the **Cloud Offload** action-bar button to restore confirmation or change
 the countdown, recommendation policy, hard hourly, total-cost, and paid-runtime
 limits, allowed regions, or material-change tolerances. Hiding normal
 confirmation does not disable these hard limits or mandatory change notices.
+
+The **Cloud Workflow** node uses the same free preflight and rental confirmation
+flow. It sends a canonical `comfy.workflow.capsule.v1` closure. Input images are
+uploaded as content-addressed artifacts before preflight. Completed images,
+meshes, and files return as artifact records, not base64 job data. Cancellation
+continues into the remote ComfyUI execution.
 
 ### Cloud Jobs panel
 
