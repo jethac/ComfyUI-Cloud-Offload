@@ -507,6 +507,20 @@ class CloudOffloadClient:
 
     # -- Jobs ------------------------------------------------------------
 
+    def job_visibility(
+        self, limit: int = 50, active_only: bool = False
+    ) -> Dict[str, Any]:
+        """Read the coordinator's allow-listed, reloadable Cloud Jobs view."""
+        return self._json(
+            "GET",
+            "/api/job-visibility",
+            query={
+                "limit": max(1, min(200, int(limit))),
+                "active_only": str(bool(active_only)).lower(),
+            },
+            timeout=10,
+        )
+
     def job_status(self, job_id: str) -> Dict[str, Any]:
         return self._json(
             "GET", f"/api/jobs/{urllib.parse.quote(job_id)}", timeout=10

@@ -124,6 +124,31 @@ def test_client_refresh_does_not_health_gate_each_request(monkeypatch):
     assert calls == [False]
 
 
+def test_job_visibility_client_uses_the_safe_bounded_endpoint(monkeypatch):
+    calls = []
+
+    def fake_json(self, method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {"schema": "cloud-offload.job-visibility.v1", "jobs": []}
+
+    monkeypatch.setattr(client_module.CloudOffloadClient, "_json", fake_json)
+    instance = client_module.CloudOffloadClient("http://coordinator.invalid")
+
+    result = instance.job_visibility(limit=500, active_only=True)
+
+    assert result["jobs"] == []
+    assert calls == [
+        (
+            "GET",
+            "/api/job-visibility",
+            {
+                "query": {"limit": 200, "active_only": "true"},
+                "timeout": 10,
+            },
+        )
+    ]
+
+
 def test_run_workflow_polls_until_result(monkeypatch):
     c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
     statuses = iter(

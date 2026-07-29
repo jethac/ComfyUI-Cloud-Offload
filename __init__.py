@@ -112,6 +112,45 @@ def _register_routes() -> None:
             )
         return web.json_response({"accepted": True})
 
+    @PromptServer.instance.routes.get("/cloud_offload/jobs")
+    async def cloud_offload_jobs(request):
+        """Proxy only the coordinator's safe job projection to the browser."""
+        import asyncio
+
+        try:
+            limit = max(1, min(200, int(request.query.get("limit", 50))))
+            active_only = str(request.query.get("active_only") or "").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            payload = await asyncio.to_thread(
+                client.job_visibility, limit, active_only
+            )
+        except (TypeError, ValueError):
+            return web.json_response({"error": "Invalid Cloud Jobs request"}, status=400)
+        except Exception:
+            return web.json_response(
+                {"error": "Cloud Offload coordinator is not available"}, status=502
+            )
+        return web.json_response(payload)
+
+    @PromptServer.instance.routes.post("/cloud_offload/jobs/{job_id}/cancel")
+    async def cloud_offload_cancel_job(request):
+        """Cancel one job without returning its private coordinator job row."""
+        import asyncio
+
+        job_id = request.match_info["job_id"]
+        try:
+            await asyncio.to_thread(client.cancel_job, job_id)
+        except Exception:
+            return web.json_response(
+                {"error": "Cloud Offload could not cancel this job"}, status=502
+            )
+        return web.json_response(
+            {"job_id": job_id, "cancellation_requested": True}
+        )
+
     @PromptServer.instance.routes.get("/cloud_offload/cache/status")
     async def cloud_offload_cache_status(request):
         return await _proxy(client.cache_status)

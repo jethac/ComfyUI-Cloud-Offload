@@ -106,6 +106,23 @@ the countdown, recommendation policy, hard hourly and total-cost limits,
 allowed regions, or material-change tolerances. Hiding normal confirmation
 does not disable these hard limits or mandatory change notices.
 
+### Cloud Jobs panel
+
+Use the **Cloud Jobs** action-bar button or the fixed Cloud Jobs button to open
+the persistent job panel. It loads independently of the canvas and rebuilds
+from the coordinator journal after a page reload or reconnect. Active jobs
+refresh once per second. Idle history refreshes every five seconds.
+
+Each job shows its current stage and operation, elapsed time, progress basis,
+measured transfer bytes and throughput, ETA range and confidence, GPU and Pod
+identity, rate and estimated spend, prepared-cache work, cancellation state,
+billing state, and recent safe event history. A terminal job never claims that
+billing stopped until the coordinator has a provider termination receipt.
+
+The same-origin ComfyUI proxy returns only the coordinator's allow-listed job
+projection. Workflows, prompts, local paths, signed URLs, raw events, and raw
+coordinator job rows do not enter the browser panel.
+
 ## Example
 
 ```text
