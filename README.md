@@ -102,9 +102,9 @@ change always opens a new mandatory confirmation. The coordinator enforces the
 countdown, so no paid job can start early from the browser.
 
 Use the **Cloud Offload** action-bar button to restore confirmation or change
-the countdown, recommendation policy, hard hourly and total-cost limits,
-allowed regions, or material-change tolerances. Hiding normal confirmation
-does not disable these hard limits or mandatory change notices.
+the countdown, recommendation policy, hard hourly, total-cost, and paid-runtime
+limits, allowed regions, or material-change tolerances. Hiding normal
+confirmation does not disable these hard limits or mandatory change notices.
 
 ### Cloud Jobs panel
 
@@ -116,8 +116,9 @@ refresh once per second. Idle history refreshes every five seconds.
 Each job shows its current stage and operation, elapsed time, progress basis,
 measured transfer bytes and throughput, ETA range and confidence, GPU and Pod
 identity, rate and estimated spend, prepared-cache work, cancellation state,
-billing state, and recent safe event history. A terminal job never claims that
-billing stopped until the coordinator has a provider termination receipt.
+billing state, durable resource lease, provider closure time, and recent safe
+event history. A terminal job never claims that billing stopped until the
+coordinator has a provider termination receipt for the exact resource.
 
 The same-origin ComfyUI proxy returns only the coordinator's allow-listed job
 projection. Workflows, prompts, local paths, signed URLs, raw events, and raw

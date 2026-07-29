@@ -30,6 +30,7 @@ function job(overrides = {}) {
       gpu_type: "A100 SXM",
       region: "US-MD-1",
       pod_id: "pod-1",
+      lease_id: "lease-1",
       volume_id: "volume-1",
     },
     cost: {
@@ -84,9 +85,24 @@ test("builds a complete view of stage, ETA, cost, transfer, cache, and identity"
   assert.equal(view.expectedCost, "$0.22–$0.30")
   assert.equal(view.cache, "2 hit · 1 miss · 1.0 KiB restored · 1 saved")
   assert.equal(view.podId, "pod-1")
+  assert.equal(view.leaseId, "lease-1")
   assert.equal(view.volumeId, "volume-1")
   assert.equal(view.billing, "Billing is active")
+  assert.equal(view.closure, "Provider closure is not confirmed")
   assert.equal(view.preflight, "Confirmed · medium confidence · 2 history samples")
+})
+
+test("shows the provider closure receipt", () => {
+  const view = jobView(job({
+    terminal: true,
+    billing: {
+      state: "stopped",
+      termination_confirmed: true,
+      termination_confirmed_at: "2026-07-30T01:02:03Z",
+    },
+  }))
+  assert.equal(view.billing, "GPU closed; billing stopped")
+  assert.equal(view.closure, "Provider confirmed · 2026-07-30T01:02:03Z")
 })
 
 test("keeps unknown ETA, spend, and billing honest", () => {
