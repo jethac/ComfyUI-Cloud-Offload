@@ -27,6 +27,10 @@ export function byteSize(value) {
   return `${amount.toFixed(unit > 1 && amount < 10 ? 1 : 0)} ${units[unit]}`
 }
 
+export function bindApiFetch(apiObject) {
+  return apiObject.fetchApi.bind(apiObject)
+}
+
 export function candidateView(candidate = {}, report = {}) {
   const estimate = candidate.estimate || {}
   const preparation = candidate.preparation || {}

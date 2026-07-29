@@ -2,11 +2,24 @@ import test from "node:test"
 import assert from "node:assert/strict"
 
 import {
+  bindApiFetch,
   byteSize,
   candidateView,
   durationRange,
   moneyRange,
 } from "./rentalConfirmationModel.js"
+
+test("binds the ComfyUI request method to its API object", async () => {
+  const api = {
+    marker: "comfy-api",
+    fetchApi(path) {
+      assert.equal(this.marker, "comfy-api")
+      return path
+    },
+  }
+
+  assert.equal(await bindApiFetch(api)("/cloud_offload/test"), "/cloud_offload/test")
+})
 
 test("formats the cost and time ranges shown before rental", () => {
   assert.equal(moneyRange([0.12, 0.24]), "$0.12–$0.24")

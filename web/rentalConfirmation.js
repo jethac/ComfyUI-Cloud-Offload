@@ -1,5 +1,6 @@
 import { api } from "/scripts/api.js"
 import {
+  bindApiFetch,
   byteSize,
   candidateView,
   durationRange,
@@ -150,8 +151,9 @@ export function openRentalConfirmation(report, options = {}) {
   })
 }
 
-export async function postRentalDecision(confirmationId, decision, fetchApi = api.fetchApi) {
-  const response = await fetchApi(
+export async function postRentalDecision(confirmationId, decision, fetchApi = null) {
+  const request = fetchApi || bindApiFetch(api)
+  const response = await request(
     `/cloud_offload/confirmations/${encodeURIComponent(confirmationId)}`,
     {
       method: "POST",
