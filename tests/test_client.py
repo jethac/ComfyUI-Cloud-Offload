@@ -158,22 +158,38 @@ def test_run_workflow_polls_until_result(monkeypatch):
             {"status": "completed", "result": {"prompt_id": "prompt-1"}},
         ]
     )
+    submitted = []
+    monkeypatch.setattr(c, "preflight_workflow", lambda payload: preflight_report())
     monkeypatch.setattr(c, "submit_workflow", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(c, "job_events", lambda job_id, after: {"events": []})
     monkeypatch.setattr(c, "job_status", lambda job_id: next(statuses))
     monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
 
-    assert c.run_comfyui_workflow({"workflow": {"1": {}}}) == {"prompt_id": "prompt-1"}
+    monkeypatch.setattr(
+        c,
+        "submit_workflow",
+        lambda payload: submitted.append(payload) or {"job_id": "job-1"},
+    )
+    assert c.run_comfyui_workflow(
+        {"workflow": {"1": {"class_type": "Test", "inputs": {}}}}
+    ) == {"prompt_id": "prompt-1", "job_id": "job-1"}
+    assert submitted[0]["capsule"]["schema"] == "comfy.workflow.capsule.v1"
+    assert submitted[0]["preflight_id"] == "preflight-1"
 
 
 def test_run_workflow_raises_on_failed_job(monkeypatch):
     c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    monkeypatch.setattr(c, "preflight_workflow", lambda payload: preflight_report())
     monkeypatch.setattr(c, "submit_workflow", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(c, "job_events", lambda job_id, after: {"events": []})
     monkeypatch.setattr(
         c, "job_status", lambda job_id: {"status": "failed", "error": "boom"}
     )
 
     with pytest.raises(CloudOffloadError, match="boom"):
-        c.run_comfyui_workflow({"workflow": {"1": {}}})
+        c.run_comfyui_workflow(
+            {"workflow": {"1": {"class_type": "Test", "inputs": {}}}}
+        )
 
 
 def preflight_report(*, required=False, mandatory=False):
@@ -508,7 +524,8 @@ def test_cloud_workflow_node_forwards_api_prompt_and_image(monkeypatch):
     monkeypatch.setattr(
         nodes.client,
         "run_comfyui_workflow",
-        lambda payload: submitted.append(payload) or {"outputs": {}, "images": []},
+        lambda payload, **kwargs: submitted.append(payload)
+        or {"outputs": {}, "artifacts": []},
     )
 
     first_image, result_json = nodes.CloudWorkflow().execute(

@@ -9,6 +9,7 @@ file-artifact restore helpers used when a cloud partition returns a mesh or a
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -455,6 +456,9 @@ class CloudOffloadClient:
     def preflight_partition(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._json("POST", "/api/preflight", payload=payload, timeout=120)
 
+    def preflight_workflow(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._json("POST", "/api/preflight", payload=payload, timeout=120)
+
     # -- Artifacts -------------------------------------------------------
 
     def upload_partition_artifact(self, path: str | Path) -> Dict[str, Any]:
@@ -541,34 +545,239 @@ class CloudOffloadClient:
 
     # -- High-level flows ------------------------------------------------
 
-    def run_comfyui_workflow(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Submit and wait for a whole API-format workflow on a cloud runner."""
-        job = self.submit_workflow(payload)
-        job_id = job["job_id"]
-        deadline = time.monotonic() + self.timeout
-        while True:
-            try:
-                _throw_if_processing_interrupted()
-            except Exception:
+    def run_comfyui_workflow(
+        self,
+        payload: Dict[str, Any],
+        *,
+        progress_callback: Any | None = None,
+        cancellation_event: threading.Event | None = None,
+        confirmation_callback: Any | None = None,
+    ) -> Dict[str, Any]:
+        """Preflight, confirm, run, and observe one whole-workflow capsule."""
+
+        workflow = payload.get("workflow") or {}
+        inputs = payload.get("inputs") or {}
+        capsule = payload.get("capsule") or {
+            "schema": "comfy.workflow.capsule.v1",
+            "workflow": workflow,
+            "runner": payload.get("runner")
+            or {"profile": "comfyui", "gpu_type": "any", "min_gpu_ram_gb": 16},
+            "residency": payload.get("residency") or "cloud",
+            "assets": payload.get("assets") or [],
+            "node_packs": payload.get("node_packs") or [],
+            "inputs": [
+                {"name": str(filename), "kind": "image", "required": True}
+                for filename in sorted(inputs)
+            ],
+            "outputs": payload.get("outputs") or [],
+            "environment": payload.get("environment") or {},
+            "dynamic_behavior": payload.get("dynamic_behavior")
+            or {"declared": False, "requirements": []},
+        }
+        provider = str(payload.get("provider") or "auto")
+        timeout_seconds = int(payload.get("timeout_seconds") or self.timeout)
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise CloudOffloadError("Cloud workflow was cancelled before rental")
+        _throw_if_processing_interrupted()
+
+        with tempfile.TemporaryDirectory(prefix="cloud-offload-workflow-") as temporary:
+            root = Path(temporary).resolve()
+            input_artifacts: Dict[str, str] = {}
+            for filename, encoded in inputs.items():
+                name = str(filename)
+                if Path(name).name != name or "/" in name or "\\" in name:
+                    raise CloudOffloadError(f"Invalid workflow input name: {name!r}")
                 try:
-                    self.cancel_job(job_id)
-                finally:
-                    raise
-            status = self.job_status(job_id)
-            state = status.get("status")
-            if state == "completed":
-                return status.get("result") or {}
-            if state in {"failed", "dead_letter"}:
-                raise CloudOffloadError(
-                    status.get("error") or "Cloud workflow failed"
-                )
-            if state in {"cancelled", "cancel_requested"}:
-                raise CloudOffloadError("Cloud workflow was cancelled")
-            if time.monotonic() >= deadline:
-                raise CloudOffloadError(
-                    f"Timed out waiting for cloud workflow {job_id}"
-                )
-            time.sleep(1)
+                    content = base64.b64decode(str(encoded), validate=True)
+                except ValueError as exc:
+                    raise CloudOffloadError(
+                        f"Invalid base64 workflow input: {name}"
+                    ) from exc
+                path = root / name
+                path.write_bytes(content)
+                uploaded = self.upload_partition_artifact(path)
+                input_artifacts[name] = uploaded["artifact_id"]
+            if progress_callback is not None:
+                progress_callback({"type": "preflight_started", "overall_progress": 0})
+            report = self.preflight_workflow(
+                {
+                    "capsule": capsule,
+                    "input_artifacts": input_artifacts,
+                    "provider": provider,
+                }
+            )
+            while True:
+                state = str(report.get("status") or "")
+                if state not in {"ready", "ready_with_preparation"}:
+                    issues = report.get("blockers") or report.get("unknowns") or []
+                    messages = [
+                        str(item.get("message") or item.get("code") or "")
+                        for item in issues
+                        if isinstance(item, dict)
+                    ]
+                    detail = "; ".join(item for item in messages if item)
+                    raise CloudOffloadError(
+                        "Cloud Offload workflow preflight is not ready"
+                        + (f": {detail}" if detail else "")
+                    )
+                recommendation = report.get("recommendation") or {}
+                candidate_id = str(recommendation.get("candidate_id") or "")
+                confirmation = report.get("confirmation") or {}
+                needs_decision = bool(confirmation.get("required")) or not candidate_id
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "type": "preflight_ready",
+                            "overall_progress": 0,
+                            "candidate_count": len(report.get("candidates") or []),
+                            "confirmation_required": needs_decision,
+                        }
+                    )
+                if needs_decision:
+                    if confirmation_callback is None:
+                        raise CloudOffloadError(
+                            "Cloud Offload rental confirmation requires an active browser"
+                        )
+                    decision = confirmation_callback(report)
+                else:
+                    decision = {
+                        "action": "policy_skip",
+                        "candidate_id": candidate_id,
+                        "dont_show_again": False,
+                    }
+                if str(decision.get("action") or "") == "cancel":
+                    raise CloudOffloadError(
+                        "Cloud workflow was cancelled before GPU rental"
+                    )
+                candidate_id = str(decision.get("candidate_id") or candidate_id)
+                valid_candidates = {
+                    str(item.get("candidate_id") or "")
+                    for item in report.get("candidates") or []
+                }
+                if not candidate_id or candidate_id not in valid_candidates:
+                    raise CloudOffloadError(
+                        "The selected GPU is not in the current preflight report"
+                    )
+                submit_payload = {
+                    "capsule": capsule,
+                    "input_artifacts": input_artifacts,
+                    "provider": provider,
+                    "timeout_seconds": timeout_seconds,
+                    "preflight_id": report["preflight_id"],
+                    "manifest_digest": report["manifest_digest"],
+                    "candidate_id": candidate_id,
+                    "confirmation_action": str(
+                        decision.get("action") or "policy_skip"
+                    ),
+                }
+                revised_report = None
+                while True:
+                    if cancellation_event is not None and cancellation_event.is_set():
+                        raise CloudOffloadError(
+                            "Cloud workflow was cancelled before GPU rental"
+                        )
+                    _throw_if_processing_interrupted()
+                    try:
+                        job = self.submit_workflow(submit_payload)
+                        break
+                    except CloudOffloadError as exc:
+                        revised = exc.details.get("revised_preflight")
+                        if (
+                            exc.code == "cloud_offload.preflight_changed"
+                            and isinstance(revised, dict)
+                        ):
+                            revised_report = revised
+                            if progress_callback is not None:
+                                progress_callback(
+                                    {
+                                        "type": "preflight_changed",
+                                        "overall_progress": 0,
+                                        "changes": exc.details.get("changes") or [],
+                                    }
+                                )
+                            break
+                        if exc.code == "cloud_offload.confirmation_countdown_active":
+                            remaining = max(
+                                1, int(exc.details.get("remaining_seconds") or 1)
+                            )
+                            wait_seconds = min(remaining, 5)
+                            if cancellation_event is not None:
+                                if cancellation_event.wait(wait_seconds):
+                                    raise CloudOffloadError(
+                                        "Cloud workflow was cancelled before GPU rental"
+                                    ) from exc
+                            else:
+                                time.sleep(wait_seconds)
+                            continue
+                        raise
+                if revised_report is not None:
+                    report = revised_report
+                    continue
+                if decision.get("dont_show_again"):
+                    try:
+                        self.update_config({"rental_confirmation": "never"})
+                    except CloudOffloadError as exc:
+                        if progress_callback is not None:
+                            progress_callback(
+                                {
+                                    "type": "confirmation_setting_failed",
+                                    "overall_progress": 0,
+                                    "error": str(exc),
+                                }
+                            )
+                break
+
+            job_id = job["job_id"]
+            deadline = time.monotonic() + timeout_seconds
+            event_cursor = 0
+            while True:
+                if cancellation_event is not None and cancellation_event.is_set():
+                    try:
+                        self.cancel_job(job_id)
+                    finally:
+                        raise CloudOffloadError("Cloud workflow was cancelled")
+                try:
+                    _throw_if_processing_interrupted()
+                except Exception:
+                    try:
+                        self.cancel_job(job_id)
+                    finally:
+                        raise
+                status = self.job_status(job_id)
+                try:
+                    event_page = self.job_events(job_id, event_cursor)
+                    for item in event_page.get("events") or []:
+                        event_cursor = max(
+                            event_cursor, int(item.get("sequence") or 0)
+                        )
+                        if progress_callback is not None:
+                            progress_callback(
+                                {
+                                    **(item.get("event") or {}),
+                                    "sequence": item.get("sequence"),
+                                    "created_at": item.get("created_at"),
+                                    "job_id": job_id,
+                                }
+                            )
+                    next_after = event_page.get("next_after")
+                    if isinstance(next_after, int):
+                        event_cursor = max(event_cursor, next_after)
+                except CloudOffloadError:
+                    pass
+                state = status.get("status")
+                if state == "completed":
+                    return {**(status.get("result") or {}), "job_id": job_id}
+                if state in {"failed", "dead_letter"}:
+                    raise CloudOffloadError(
+                        status.get("error") or "Cloud workflow failed"
+                    )
+                if state in {"cancelled", "cancel_requested"}:
+                    raise CloudOffloadError("Cloud workflow was cancelled")
+                if time.monotonic() >= deadline:
+                    raise CloudOffloadError(
+                        f"Cloud workflow {job_id} exceeded {timeout_seconds}s"
+                    )
+                time.sleep(1)
 
     def run_comfyui_partition(
         self,
