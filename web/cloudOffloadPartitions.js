@@ -2,6 +2,7 @@ import { app } from "/scripts/app.js"
 import { api } from "/scripts/api.js"
 import { compilePartitions, expandPartitionMembers } from "./partitionCompiler.js"
 import { formatBalance } from "./providerBalance.js"
+import { partitionProgressStatus } from "./progressFeedback.js"
 import {
   SETTING_GPU_TYPE,
   SETTING_KEEP_WARM,
@@ -322,7 +323,12 @@ function handlePartitionEvent(message) {
   const runtime = group.__cloudOffloadRuntime
   runtime.last_event = event
   runtime.job_id = event.job_id || runtime.job_id
-  runtime.progress = event.overall_progress ?? runtime.progress ?? 0
+  // Progress events from nested Comfy nodes can arrive interleaved with a
+  // coarse 10% progress_state snapshot. Never make a live job move backward.
+  runtime.progress = Math.max(
+    Number(runtime.progress || 0),
+    Number(event.overall_progress ?? runtime.progress ?? 0),
+  )
   const baseTitle = settings.base_title || group.title.replace(/ · \d+%.*$/, "")
   settings.base_title = baseTitle
 
@@ -352,6 +358,7 @@ function handlePartitionEvent(message) {
     runtime.status = `retry in ${event.retry_seconds || "?"}s`
     group.color = RUNNING_COLOR
   } else if (event.type !== "preview") {
+    runtime.status = partitionProgressStatus(event) || runtime.status
     group.color = RUNNING_COLOR
   }
 

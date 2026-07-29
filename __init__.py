@@ -95,6 +95,14 @@ def _register_routes() -> None:
     async def cloud_offload_cache_status(request):
         return await _proxy(client.cache_status)
 
+    @PromptServer.instance.routes.post("/cloud_offload/cache/s3-credentials")
+    async def cloud_offload_cache_s3_credentials(request):
+        # Both values are forwarded once to the coordinator's OS keychain and
+        # are never persisted by ComfyUI or returned to the browser.
+        return await _proxy(
+            client.set_cache_s3_credentials, await _read_body(request)
+        )
+
     @PromptServer.instance.routes.post("/cloud_offload/cache/volumes")
     async def cloud_offload_cache_volume(request):
         return await _proxy(
