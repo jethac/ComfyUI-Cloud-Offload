@@ -15,6 +15,7 @@ import os
 import shutil
 import socket
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -489,6 +490,7 @@ class CloudOffloadClient:
         provider: str = "auto",
         timeout_seconds: int = 3600,
         progress_callback: Any | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> Dict[str, Any]:
         """Serialize inputs, execute a compiled partition, and restore outputs."""
         try:
@@ -516,6 +518,11 @@ class CloudOffloadClient:
             deadline = time.monotonic() + int(timeout_seconds)
             event_cursor = 0
             while True:
+                if cancellation_event is not None and cancellation_event.is_set():
+                    try:
+                        self.cancel_job(job_id)
+                    finally:
+                        raise CloudOffloadError("Cloud partition was cancelled")
                 try:
                     _throw_if_processing_interrupted()
                 except Exception:

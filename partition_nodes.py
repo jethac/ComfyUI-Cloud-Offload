@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,7 @@ class CloudPartitionGateway(io.ComfyNode):
                     server.client_id,
                 )
 
+        cancellation_event = threading.Event()
         try:
             result = await asyncio.to_thread(
                 client.run_comfyui_partition,
@@ -131,7 +133,18 @@ class CloudPartitionGateway(io.ComfyNode):
                 provider=provider,
                 timeout_seconds=int(timeout_seconds),
                 progress_callback=report,
+                cancellation_event=cancellation_event,
             )
+        except asyncio.CancelledError:
+            cancellation_event.set()
+            report(
+                {
+                    "type": "partition_cancelled",
+                    "overall_progress": 100,
+                    "error": "Cloud partition was cancelled",
+                }
+            )
+            raise
         except Exception as exc:
             report(
                 {

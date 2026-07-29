@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -239,6 +240,32 @@ def test_partition_cancels_when_comfyui_interrupts(monkeypatch):
     }
     with pytest.raises(RuntimeError, match="interrupted"):
         c.run_comfyui_partition(partition, {}, provider="runpod")
+    assert cancelled == ["job-1"]
+
+
+def test_partition_cancels_when_async_caller_signals_cancellation(monkeypatch):
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    cancelled = []
+    cancellation_event = threading.Event()
+    cancellation_event.set()
+    monkeypatch.setattr(c, "submit_partition", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(
+        c, "cancel_job", lambda job_id: cancelled.append(job_id) or {"status": "cancelled"}
+    )
+
+    partition = {
+        "schema": "comfy.partition.job.v1",
+        "partition_id": "p",
+        "workflow": {},
+        "outputs": [],
+    }
+    with pytest.raises(CloudOffloadError, match="cancelled"):
+        c.run_comfyui_partition(
+            partition,
+            {},
+            provider="runpod",
+            cancellation_event=cancellation_event,
+        )
     assert cancelled == ["job-1"]
 
 
