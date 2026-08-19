@@ -14,6 +14,8 @@ export const DEFAULT_PREPARED_STORAGE = Object.freeze({
 })
 
 export const RUNPOD_NETWORK_VOLUME_MAX_GB = 4000
+// RunPod's REST v2 network-volume schema rejects anything smaller.
+export const RUNPOD_NETWORK_VOLUME_MIN_GB = 10
 
 export function estimateRunPodStorageMonthly(sizeGb) {
   const size = Number(sizeGb) || 0
@@ -53,8 +55,11 @@ export function validatePreparedStorage(policy) {
   ) {
     return "Storage budget must be zero or a positive number"
   }
-  if (value.managed_size_gb < 1 || value.managed_size_gb > RUNPOD_NETWORK_VOLUME_MAX_GB) {
-    return `Managed RunPod storage must be 1-${RUNPOD_NETWORK_VOLUME_MAX_GB} GB`
+  if (
+    value.managed_size_gb < RUNPOD_NETWORK_VOLUME_MIN_GB ||
+    value.managed_size_gb > RUNPOD_NETWORK_VOLUME_MAX_GB
+  ) {
+    return `Managed RunPod storage must be ${RUNPOD_NETWORK_VOLUME_MIN_GB}-${RUNPOD_NETWORK_VOLUME_MAX_GB} GB`
   }
   return null
 }
@@ -173,7 +178,7 @@ export function mountPreparedStorage(
             </select>
           </label>
           <label>Managed size (GB)
-            <input data-cache-size type="number" min="1" max="4000" step="1" style="display:block;width:100%;margin-top:4px" />
+            <input data-cache-size type="number" min="10" max="4000" step="1" style="display:block;width:100%;margin-top:4px" />
           </label>
           <label>Monthly storage budget (USD)
             <input data-cache-budget type="number" min="0" step="1" placeholder="no ceiling" style="display:block;width:100%;margin-top:4px" />
