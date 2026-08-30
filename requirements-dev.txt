@@ -1,0 +1,8 @@
+# Everything the test suite needs on top of requirements.txt. torch, numpy,
+# and Pillow are provided by the host ComfyUI install in production, so they
+# are test-only dependencies here (any CPU build of torch is enough).
+-r requirements.txt
+numpy
+pillow
+pytest
+torch
