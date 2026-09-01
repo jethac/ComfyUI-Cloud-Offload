@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 node.zip
 .asset-digests.json
+.worktrees/
