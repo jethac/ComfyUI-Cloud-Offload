@@ -6,9 +6,41 @@ import {
   disclosureFor,
   estimateRunPodStorageMonthly,
   normalizePreparedStorage,
+  mountPreparedStorage,
   validatePreparedStorage,
   volumeDeleteQuery,
 } from "./preparedStorage.js"
+
+class FakeElement {
+  constructor() {
+    this.checked = false
+    this.value = ""
+    this.hidden = false
+    this.textContent = ""
+    this.style = {}
+    this.listeners = {}
+  }
+
+  addEventListener(type, callback) {
+    this.listeners[type] = callback
+  }
+}
+
+class FakeContainer extends FakeElement {
+  constructor() {
+    super()
+    this.elements = new Map()
+  }
+
+  querySelector(selector) {
+    if (!this.elements.has(selector)) this.elements.set(selector, new FakeElement())
+    return this.elements.get(selector)
+  }
+}
+
+function response(payload, ok = true, status = 200) {
+  return { ok, status, json: async () => payload }
+}
 
 test("prepared storage is opt-in and keeps safe defaults", () => {
   const policy = normalizePreparedStorage()
@@ -69,4 +101,33 @@ test("provider deletion query carries the exact typed provider id", () => {
     "delete_provider=true&confirm_provider_volume_id=vol+id%2F1"
   )
   assert.equal(volumeDeleteQuery(false), "delete_provider=false")
+})
+
+test("mounted create rejects a legacy 9 GB policy and sends a valid 10 GB policy", async () => {
+  const calls = []
+  const container = new FakeContainer()
+  const fetchApi = async (path, options) => {
+    calls.push({ path, options })
+    if (path === "/cloud_offload/cache/status") {
+      return response({ policy: { enabled: true, confirmed: true, region: "US-KS-2" }, volumes: [] })
+    }
+    return response({})
+  }
+  mountPreparedStorage(container, { fetchApi, confirmAction: () => true })
+  await new Promise((resolve) => setImmediate(resolve))
+
+  const enabled = container.querySelector("[data-cache-enabled]")
+  const size = container.querySelector("[data-cache-size]")
+  const create = container.querySelector("[data-cache-create]")
+  enabled.checked = true
+
+  size.value = "9"
+  await create.listeners.click()
+  assert.equal(calls.some(({ path }) => path === "/cloud_offload/cache/volumes"), false)
+
+  size.value = "10"
+  await create.listeners.click()
+  const createCall = calls.find(({ path }) => path === "/cloud_offload/cache/volumes")
+  assert.ok(createCall)
+  assert.equal(JSON.parse(createCall.options.body).size_gb, 10)
 })
