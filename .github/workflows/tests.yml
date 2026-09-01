@@ -19,7 +19,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -r requirements-dev.txt
-      - run: python -m pytest
+      - run: python -m pytest -q -rs | tee pytest.log
+      - run: grep -qE "^[0-9]+ passed, 1 skipped" pytest.log
 
   web:
     runs-on: ubuntu-latest

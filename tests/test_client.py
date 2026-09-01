@@ -599,6 +599,23 @@ def test_partition_nodes_use_neutral_class_and_wire_ids():
         assert node.define_schema().category.startswith("Cloud Offload")
 
 
+def test_schema_fixture_preserves_an_existing_comfy_api_parent(monkeypatch):
+    import importlib.machinery
+    import types
+
+    import conftest
+
+    parent = types.ModuleType("comfy_api")
+    parent.__path__ = []
+    parent.__spec__ = importlib.machinery.ModuleSpec("comfy_api", loader=None, is_package=True)
+    monkeypatch.setitem(__import__("sys").modules, "comfy_api", parent)
+    monkeypatch.delitem(__import__("sys").modules, "comfy_api.latest", raising=False)
+
+    conftest._install_schema_fixture()
+
+    assert __import__("sys").modules["comfy_api"] is parent
+
+
 def test_partition_path_requires_comfy_partition_root(monkeypatch):
     pytest.importorskip("comfy_api.latest")
     import partition_nodes
