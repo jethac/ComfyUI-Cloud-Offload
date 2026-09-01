@@ -385,6 +385,8 @@ export function mountPreparedStorage(
   find("[data-cache-create]").addEventListener("click", async () => {
     const policy = readPolicy()
     if (!current.enabled || !current.confirmed) return say("Enable and confirm storage first", false)
+    const invalid = validatePreparedStorage(policy)
+    if (invalid) return say(invalid, false)
     if (policy.region.toLowerCase() === "auto") return say("Choose a concrete RunPod datacenter first", false)
     const estimate = estimateRunPodStorageMonthly(policy.managed_size_gb).toFixed(2)
     if (!confirmAction(`Create a ${policy.managed_size_gb} GB RunPod network volume in ${policy.region} (published estimate: $${estimate}/month)?`)) return
