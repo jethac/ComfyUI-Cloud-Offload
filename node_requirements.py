@@ -168,8 +168,11 @@ def _pyproject_project(path: Path) -> dict[str, Any]:
     pyproject = path / PYPROJECT_FILENAME
     try:
         import tomllib
-    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 and older
-        return {}
+    except ModuleNotFoundError:  # Python 3.10 and older
+        try:
+            import tomli as tomllib
+        except ModuleNotFoundError:  # pragma: no cover - backport not installed
+            return {}
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except (OSError, ValueError):

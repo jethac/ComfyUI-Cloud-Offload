@@ -142,6 +142,24 @@ buffers, and file-backed mesh / 3D-file artifacts). Live objects (`MODEL`,
 `CLIP`, `VAE`, control nets, samplers, …) are rejected before a paid runner is
 provisioned; move their loader or producer inside the box.
 
+## Testing
+
+Python tests (torch, numpy, and Pillow come from the host ComfyUI install in
+production, so the test environment installs its own — any CPU build of torch
+is fine):
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Frontend tests use Node's built-in test runner (Node 20+, no dependencies):
+
+```bash
+cd web
+npm test
+```
+
 ## License
 
 Apache-2.0
