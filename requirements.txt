@@ -4,3 +4,4 @@
 # torch, numpy, and Pillow are provided by the host ComfyUI install.
 requests>=2.28
 safetensors>=0.4
+tomli>=1.2; python_version < "3.11"
