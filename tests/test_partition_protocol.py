@@ -6,6 +6,15 @@ import torch
 import partition_protocol as protocol
 
 
+@pytest.mark.parametrize("socket", ["UNIMATE_ASSET", "UNIMATE_RIG", "UNIMATE_MODEL", "UNIMATE_MOTION"])
+def test_unimate_versioned_value_crosses_bundle(socket, tmp_path):
+    protocol.validate_boundary_type(socket)
+    value = {"schema": socket.lower() + ".v1", "rig_id": "rig-sha256", "payload": b"numeric archive or GLB", "metadata": {"joint_names": ["root", "child"], "fps": 30}}
+    path = tmp_path / "boundary.part"
+    protocol.dump_bundle(value, path)
+    assert protocol.load_bundle(path) == value
+
+
 def test_bundle_round_trip_nested_tensor_value(tmp_path: Path):
     value = {
         "samples": torch.arange(12, dtype=torch.float32).reshape(1, 3, 2, 2),

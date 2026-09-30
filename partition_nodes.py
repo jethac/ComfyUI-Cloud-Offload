@@ -14,7 +14,7 @@ from typing import Any
 from comfy_api.latest import ComfyExtension, io
 
 try:
-    from .client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client
+    from .client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client, restore_partition_files
     from .confirmation import ConfirmationError, confirmation_broker
     from .partition_protocol import (
         ARTIFACT_MARKER,
@@ -23,7 +23,7 @@ try:
         validate_boundary_type,
     )
 except ImportError:
-    from client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client
+    from client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client, restore_partition_files
     from confirmation import ConfirmationError, confirmation_broker
     from partition_protocol import ARTIFACT_MARKER, dump_bundle, load_bundle, validate_boundary_type
 
@@ -194,7 +194,8 @@ class CloudPartitionGateway(io.ComfyNode):
                 "job_id": result.get("job_id"),
             }
         )
-        return io.NodeOutput(result)
+        ui = restore_partition_files(result) if result.get("files") else {}
+        return io.NodeOutput(result, ui=ui)
 
 
 class CloudPartitionExtract(io.ComfyNode):

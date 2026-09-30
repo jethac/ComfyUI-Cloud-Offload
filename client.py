@@ -191,6 +191,48 @@ class CloudMeshArtifact:
         shutil.copy2(self.path, destination)
 
 
+def restore_partition_files(result: dict) -> dict:
+    """Materialize runner output files under the permitted local output root."""
+    import base64
+    import binascii
+    import re
+    from pathlib import PureWindowsPath
+    import folder_paths
+    root = Path(folder_paths.get_output_directory()).resolve()
+    job_id = str(result.get("job_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+        raise CloudOffloadError("Invalid partition job identity")
+    job_relative = f"cloud_offload/{job_id}"
+    job_directory = (root / job_relative).resolve()
+    if not job_directory.is_relative_to(root):
+        raise CloudOffloadError("Partition output escapes output directory")
+    ui = {}
+    for item in result.get("files") or []:
+        filename = str(item.get("filename") or "")
+        if not filename or filename in (".", "..") or any(c in filename for c in ("/", "\\", ":")):
+            raise CloudOffloadError("Invalid partition output filename")
+        subfolder = str(item.get("subfolder") or "").replace("\\", "/")
+        pure = PureWindowsPath(subfolder)
+        if pure.drive or pure.root or ".." in pure.parts:
+            raise CloudOffloadError("Invalid partition output subfolder")
+        relative = f"{job_relative}/{subfolder}".rstrip("/")
+        directory = (root / relative).resolve()
+        if not directory.is_relative_to(job_directory):
+            raise CloudOffloadError("Partition output subfolder escapes job directory")
+        try:
+            data = base64.b64decode(item.get("data") or "", validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise CloudOffloadError("Invalid partition file data") from exc
+        path = (directory / filename).resolve()
+        if not path.is_relative_to(job_directory):
+            raise CloudOffloadError("Partition output escapes output directory")
+        directory.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        key = item.get("output_kind") if item.get("output_kind") in ("3d", "files") else "files"
+        ui.setdefault(key, []).append({"filename": filename, "subfolder": relative, "type": "output"})
+    return ui
+
+
 class CloudOffloadClient:
     """Small HTTP client for the Cloud Offload coordinator service.
 
@@ -460,6 +502,43 @@ class CloudOffloadClient:
         return self._json("POST", "/api/preflight", payload=payload, timeout=120)
 
     # -- Artifacts -------------------------------------------------------
+
+    def partition_artifact_exists(self, artifact_id: str) -> bool:
+        import requests
+        self._refresh_base_url()
+        response = requests.head(self._url(f"/api/artifacts/{urllib.parse.quote(artifact_id)}"), headers=self._headers({}), timeout=30)
+        if response.status_code in (404, 405):
+            return False
+        if not response.ok:
+            raise CloudOffloadError(f"Cloud Offload artifact lookup failed: {response.status_code}")
+        return True
+
+    def _verify_declared_assets(self, assets) -> None:
+        try:
+            from .asset_manifest import resolve_local_asset
+            from .partition_protocol import bundle_sha256
+        except ImportError:
+            from asset_manifest import resolve_local_asset
+            from partition_protocol import bundle_sha256
+        for asset in assets:
+            path = resolve_local_asset(asset["category"], asset["filename"])
+            if path is not None and bundle_sha256(path) != asset["sha256"]:
+                raise CloudOffloadError(f"Declared asset changed since compilation: {asset['filename']}")
+
+    def _upload_declared_assets(self, assets) -> None:
+        try:
+            from .asset_manifest import resolve_local_asset
+        except ImportError:
+            from asset_manifest import resolve_local_asset
+        self._verify_declared_assets(assets)
+        for asset in assets:
+            digest = asset["sha256"]
+            path = resolve_local_asset(asset["category"], asset["filename"])
+            if path is None or self.partition_artifact_exists(digest):
+                continue
+            uploaded = self.upload_partition_artifact(path)
+            if uploaded.get("artifact_id") != digest:
+                raise CloudOffloadError("Declared asset upload digest mismatch")
 
     def upload_partition_artifact(self, path: str | Path) -> Dict[str, Any]:
         """Stream a bundle to the coordinator without base64 or loading it all into memory."""
@@ -801,6 +880,8 @@ class CloudOffloadClient:
         _throw_if_processing_interrupted()
         with tempfile.TemporaryDirectory(prefix="cloud-offload-partition-") as temporary:
             root = Path(temporary)
+            declared_assets = partition.get("assets") or []
+            self._verify_declared_assets(declared_assets)
             input_artifacts: Dict[str, str] = {}
             for boundary_key, value in boundary_values.items():
                 path = root / f"{boundary_key}.part"
@@ -821,6 +902,20 @@ class CloudOffloadClient:
                     "provider": provider,
                 }
             )
+            unresolved = []
+            for issue in report.get("blockers") or []:
+                if issue.get("code") == "unresolved_assets":
+                    unresolved.extend((issue.get("details") or {}).get("assets") or [])
+            if unresolved:
+                declared = {(a["category"], a["filename"], a["sha256"]): a for a in declared_assets}
+                bootstrap = []
+                for asset in unresolved:
+                    identity = (asset.get("category"), asset.get("filename"), asset.get("sha256"))
+                    if identity not in declared:
+                        raise CloudOffloadError("Preflight returned an undeclared unresolved asset")
+                    bootstrap.append(declared[identity])
+                self._upload_declared_assets(bootstrap)
+                report = self.preflight_partition({"partition": partition, "input_artifacts": input_artifacts, "provider": provider})
             while True:
                 state = str(report.get("status") or "")
                 if state not in {"ready", "ready_with_preparation"}:

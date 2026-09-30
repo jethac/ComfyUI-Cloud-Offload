@@ -11,6 +11,17 @@ import {
   propagateTaint,
 } from "./partitionCompiler.js"
 
+test("UniMate selected partitions preserve all custom boundary types and declared loader assets", () => {
+  for (const type of ["UNIMATE_ASSET", "UNIMATE_RIG", "UNIMATE_MODEL", "UNIMATE_MOTION"]) {
+    const { prompt, partition } = fixture(type)
+    const asset = {category:"__input__", filename:"rig with spaces.glb", sha256:"a".repeat(64), size:4, format:"other"}
+    const compiled = compilePartition(prompt, partition, {assetManifest:{[partition.partition_id]:{assets:[asset],unknown:[]}}})
+    assert.equal(compiled.remoteSpec.inputs[0].type, type)
+    assert.equal(compiled.remoteSpec.outputs[0].type, type)
+    assert.deepEqual(compiled.remoteSpec.assets, [asset])
+  }
+})
+
 test("expands boxed subgraphs to the executable prompt nodes", () => {
   const innerNode = (id, inputType, outputType) => ({
     id,

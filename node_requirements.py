@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -38,7 +39,7 @@ CORE_MODULE_PREFIXES = ("comfy_extras.", "comfy_api_nodes.")
 SOURCE_SUFFIX = ".py"
 # Never part of a pack's identity: bytecode is derived, and a checkout's git
 # metadata changes with every fetch without a line of code moving.
-SKIPPED_DIRECTORIES = frozenset({"__pycache__", ".git"})
+SKIPPED_DIRECTORIES = frozenset({"__pycache__", ".git", ".runtime"})
 
 PYPROJECT_FILENAME = "pyproject.toml"
 
@@ -131,13 +132,14 @@ def _source_files(path: Path) -> list[tuple[str, Path]]:
     if path.is_file():
         return [(path.name, path)] if path.suffix.lower() == SOURCE_SUFFIX else []
     found: list[tuple[str, Path]] = []
-    for candidate in path.rglob("*.py"):
-        if not candidate.is_file():
-            continue
-        relative = candidate.relative_to(path)
-        if any(part in SKIPPED_DIRECTORIES for part in relative.parts[:-1]):
-            continue
-        found.append((relative.as_posix(), candidate))
+    def fail_unreadable(error):
+        raise error
+    for directory, subdirectories, filenames in os.walk(path, onerror=fail_unreadable):
+        subdirectories[:] = [name for name in subdirectories if name not in SKIPPED_DIRECTORIES]
+        for filename in filenames:
+            candidate = Path(directory) / filename
+            if candidate.suffix.lower() == SOURCE_SUFFIX and candidate.is_file():
+                found.append((candidate.relative_to(path).as_posix(), candidate))
     return sorted(found, key=lambda item: item[0])
 
 

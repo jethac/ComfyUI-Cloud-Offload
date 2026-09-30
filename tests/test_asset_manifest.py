@@ -15,6 +15,75 @@ from types import SimpleNamespace
 import asset_manifest
 
 
+def test_exact_hook_replaces_collision_at_only_its_input(tmp_path, monkeypatch):
+    filename = "official.unimate"
+    files = {"checkpoints": b"wrong or independently selected checkpoint", "unimate": b"correct unimate bundle"}
+    for category, data in files.items():
+        path = tmp_path / category / filename
+        path.parent.mkdir()
+        path.write_bytes(data)
+    folders = SimpleNamespace(folder_names_and_paths=dict.fromkeys(files),
+        get_filename_list=lambda category: [filename],
+        get_full_path=lambda category, name: str(tmp_path / category / name),
+        get_user_directory=lambda: str(tmp_path / "user"))
+    monkeypatch.setitem(sys.modules, "folder_paths", folders)
+    class Loader:
+        cloud_offload_assets = staticmethod(lambda inputs: [{"category": "unimate", "filename": inputs["bundle"]}])
+    monkeypatch.setitem(sys.modules, "nodes", SimpleNamespace(NODE_CLASS_MAPPINGS={"Loader": Loader}))
+    prompt = {"1": {"class_type": "Loader", "inputs": {"bundle": filename}}}
+    result = asset_manifest.build_manifest(prompt, ["1"])
+    assert result["unknown"] == []
+    assert result["assets"] == [{"category": "unimate", "filename": filename,
+        "sha256": hashlib.sha256(files["unimate"]).hexdigest(), "size": len(files["unimate"]), "format": "other"}]
+    # A distinct node still selects the colliding checkpoint; filtering a
+    # deduplicated discovery list must not lose this separate input site.
+    prompt["2"] = {"class_type": "OtherLoader", "inputs": {"checkpoint": filename}}
+    result = asset_manifest.build_manifest(prompt, ["1", "2"])
+    assert {(a["category"], a["sha256"]) for a in result["assets"]} == {
+        (category, hashlib.sha256(data).hexdigest()) for category, data in files.items()}
+
+
+def test_explicit_hook_input_preserves_same_filename_in_another_input(tmp_path, monkeypatch):
+    folders = fake_folder_paths(tmp_path, present=("checkpoints/shared.safetensors", "unimate/shared.safetensors"))
+    folders.get_filename_list = lambda category: ["shared.safetensors"]
+    monkeypatch.setitem(sys.modules, "folder_paths", folders)
+    class Loader:
+        cloud_offload_assets = staticmethod(lambda inputs: [{"category": "unimate", "filename": inputs["bundle"], "input_name": "bundle"}])
+    monkeypatch.setitem(sys.modules, "nodes", SimpleNamespace(NODE_CLASS_MAPPINGS={"Loader": Loader}))
+    result = asset_manifest.build_manifest({"1": {"class_type": "Loader", "inputs": {"bundle": "shared.safetensors", "checkpoint": "shared.safetensors"}}}, ["1"])
+    assert {a["category"] for a in result["assets"]} == {"checkpoints", "unimate"}
+
+
+def test_pack_declares_bundle_and_input_files(tmp_path, monkeypatch):
+    folders = fake_folder_paths(tmp_path, present=("unimate/demo.unimate",))
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    (input_root / "rig.glb").write_bytes(b"rig")
+    folders.get_input_directory = lambda: str(input_root)
+    monkeypatch.setitem(sys.modules, "folder_paths", folders)
+    class Loader:
+        @classmethod
+        def cloud_offload_assets(cls, inputs):
+            return [{"category": "unimate", "filename": inputs["bundle"]},
+                    {"category": "__input__", "filename": inputs["asset"]}]
+    monkeypatch.setitem(sys.modules, "nodes", SimpleNamespace(NODE_CLASS_MAPPINGS={"Loader": Loader}))
+    result = asset_manifest.build_manifest({"1": {"class_type": "Loader", "inputs": {"bundle": "demo.unimate", "asset": "rig.glb"}}}, ["1"])
+    assert result["unknown"] == []
+    assert {(a["category"], a["filename"]) for a in result["assets"]} == {("unimate", "demo.unimate"), ("__input__", "rig.glb")}
+
+
+def test_pack_asset_hook_rejects_input_escape(tmp_path, monkeypatch):
+    folders = fake_folder_paths(tmp_path)
+    folders.get_input_directory = lambda: str(tmp_path / "input")
+    monkeypatch.setitem(sys.modules, "folder_paths", folders)
+    class Loader:
+        cloud_offload_assets = staticmethod(lambda inputs: [{"category": "__input__", "filename": "../secret.glb"}])
+    monkeypatch.setitem(sys.modules, "nodes", SimpleNamespace(NODE_CLASS_MAPPINGS={"Loader": Loader}))
+    result = asset_manifest.build_manifest({"1": {"class_type": "Loader", "inputs": {}}}, ["1"])
+    assert result["assets"] == []
+    assert result["unknown"] and "unsafe" in result["unknown"][0]["reason"].lower()
+
+
 FILENAME_LISTS = {
     "checkpoints": ["sd_xl_base_1.0.safetensors", "SDXL/refiner.safetensors"],
     "loras": ["detail_tweaker.safetensors", "shared.safetensors"],

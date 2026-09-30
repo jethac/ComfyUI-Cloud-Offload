@@ -10,6 +10,106 @@ import client as client_module
 from client import CloudOffloadClient, CloudOffloadError
 
 
+def test_partition_files_restore_to_local_output(tmp_path, monkeypatch):
+    import sys
+    import base64
+    from types import SimpleNamespace
+    monkeypatch.setitem(sys.modules, "folder_paths", SimpleNamespace(get_output_directory=lambda: str(tmp_path)))
+    result = {"job_id": "job-1", "files": [{"filename": "motion.glb", "subfolder": "remote", "data": base64.b64encode(b"glTF").decode(), "output_kind": "3d"}, {"filename": "motion.json", "data": "e30=", "output_kind": "files"}]}
+    restored = client_module.restore_partition_files(result)
+    assert (tmp_path / "cloud_offload" / "job-1" / "remote" / "motion.glb").read_bytes() == b"glTF"
+    assert (tmp_path / "cloud_offload" / "job-1" / "motion.json").read_bytes() == b"{}"
+    assert restored["3d"][0]["subfolder"] == "cloud_offload/job-1/remote"
+    with pytest.raises(CloudOffloadError, match="filename"):
+        client_module.restore_partition_files({"job_id": "job-1", "files": [{"filename": "../secret", "data": "e30="}]})
+
+
+def test_two_exports_keep_distinct_glb_and_provenance_pairs(tmp_path, monkeypatch):
+    import sys
+    import base64
+    from types import SimpleNamespace
+    monkeypatch.setitem(sys.modules, "folder_paths", SimpleNamespace(get_output_directory=lambda: str(tmp_path)))
+    files = [{"filename": name, "subfolder": f"unimate/{run}",
+              "data": base64.b64encode(f"{run}/{name}".encode()).decode(), "output_kind": kind}
+             for run in ("run1", "run2") for name, kind in (("animation.glb", "3d"), ("animation.json", "files"))]
+    ui = client_module.restore_partition_files({"job_id": "job-1", "files": files})
+    assert len(ui["3d"]) == len(ui["files"]) == 2
+    for item in files:
+        path = tmp_path / "cloud_offload" / "job-1" / item["subfolder"] / item["filename"]
+        assert path.read_bytes() == base64.b64decode(item["data"])
+
+
+@pytest.mark.parametrize("subfolder", ["../escape", "/absolute", "C:/absolute", "..\\escape"])
+def test_returned_file_rejects_unsafe_subfolder(tmp_path, monkeypatch, subfolder):
+    import sys
+    from types import SimpleNamespace
+    monkeypatch.setitem(sys.modules, "folder_paths", SimpleNamespace(get_output_directory=lambda: str(tmp_path)))
+    with pytest.raises(CloudOffloadError, match="subfolder"):
+        client_module.restore_partition_files({"job_id": "job-1", "files": [{"filename": "motion.glb", "subfolder": subfolder, "data": "Z2xURg=="}]})
+
+
+def test_declared_local_assets_upload_only_when_missing(tmp_path, monkeypatch):
+    import hashlib
+    import sys
+    from types import SimpleNamespace
+    path = tmp_path / "demo.unimate"
+    path.write_bytes(b"model archive")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setitem(sys.modules, "folder_paths", SimpleNamespace(get_full_path=lambda category, filename: str(path)))
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    uploads = []
+    monkeypatch.setattr(c, "partition_artifact_exists", lambda artifact_id: False)
+    monkeypatch.setattr(c, "upload_partition_artifact", lambda p: uploads.append(p) or {"artifact_id": digest})
+    c._upload_declared_assets([{"category": "unimate", "filename": "demo.unimate", "sha256": digest, "size": path.stat().st_size}])
+    assert uploads == [path]
+    monkeypatch.setattr(c, "partition_artifact_exists", lambda artifact_id: True)
+    c._upload_declared_assets([{"category": "unimate", "filename": "demo.unimate", "sha256": digest}])
+    assert uploads == [path]
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_declared_upload_rejects_changed_local_bytes(tmp_path, monkeypatch, cached):
+    import sys
+    from types import SimpleNamespace
+    path = tmp_path / "model.unimate"
+    path.write_bytes(b"changed")
+    monkeypatch.setitem(sys.modules, "folder_paths", SimpleNamespace(get_full_path=lambda category, filename: str(path)))
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    monkeypatch.setattr(c, "partition_artifact_exists", lambda artifact_id: cached)
+    with pytest.raises(CloudOffloadError, match="changed"):
+        c._upload_declared_assets([{"category": "unimate", "filename": "model.unimate", "sha256": "a" * 64}])
+
+
+@pytest.mark.parametrize("unresolved", [False, True])
+def test_source_resolution_precedes_local_asset_bootstrap(tmp_path, monkeypatch, unresolved):
+    import sys
+    import hashlib
+    from types import SimpleNamespace
+    path = tmp_path / "model.unimate"
+    path.write_bytes(b"valid model")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    asset = {"category": "unimate", "filename": path.name, "sha256": digest,
+             "size": 10 if unresolved else 3 * 1024 ** 3, "format": "other"}
+    monkeypatch.setitem(sys.modules, "folder_paths", SimpleNamespace(get_full_path=lambda category, filename: str(path)))
+    c = CloudOffloadClient(base_url="http://127.0.0.1:11501")
+    uploads, preflights = [], []
+    monkeypatch.setattr(c, "partition_artifact_exists", lambda digest: False)
+    monkeypatch.setattr(c, "upload_partition_artifact", lambda path: uploads.append(path) or {"artifact_id": digest})
+    def preflight(payload):
+        preflights.append(payload)
+        if unresolved and not uploads:
+            return {"status": "blocked", "blockers": [{"code": "unresolved_assets", "details": {"assets": [asset]}}]}
+        return preflight_report()
+    monkeypatch.setattr(c, "preflight_partition", preflight)
+    monkeypatch.setattr(c, "submit_partition", lambda payload: {"job_id": "job-1"})
+    monkeypatch.setattr(c, "job_status", lambda job_id: {"status": "completed", "result": {"output_artifacts": {}}})
+    monkeypatch.setattr(c, "job_events", lambda *args, **kwargs: {"events": []})
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    c.run_comfyui_partition({"schema": "comfy.partition.job.v1", "partition_id": "p", "assets": [asset]}, {})
+    assert uploads == ([path] if unresolved else [])
+    assert len(preflights) == (2 if unresolved else 1)
+
+
 def load_nodes_module():
     path = Path(__file__).resolve().parents[1] / "nodes.py"
     spec = importlib.util.spec_from_file_location("cloud_offload_nodes", path)

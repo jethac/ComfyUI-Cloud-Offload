@@ -180,6 +180,30 @@ def test_the_digest_changes_when_a_source_file_changes(tmp_path: Path):
     assert node_requirements.pack_digest(pack) != before
 
 
+def test_runtime_work_files_do_not_change_installed_source_identity(tmp_path):
+    pack = write_pack(tmp_path, "pack", {"__init__.py": "value = 1\n", "actual_package/source.py": "code = 1\n"})
+    before = node_requirements.pack_digest(pack)
+    work_file = pack / ".runtime" / "venv" / "library.py"
+    work_file.parent.mkdir(parents=True)
+    work_file.write_text("development dependency = 1")
+    assert len(node_requirements._source_files(pack)) == 2
+    assert node_requirements.pack_digest(pack) == before
+    (pack / "actual_package" / "source.py").write_text("code = 2\n")
+    assert node_requirements.pack_digest(pack) != before
+
+
+def test_source_identity_never_traverses_runtime_work_tree(tmp_path, monkeypatch):
+    import os
+    pack = write_pack(tmp_path, "pack", {"__init__.py": "value = 1\n", ".runtime/loop/dependency.py": "ignored = 1\n"})
+    original = os.scandir
+    def guarded(path):
+        if ".runtime" in Path(path).parts:
+            raise OSError("Development runtime may contain unreadable junction loops")
+        return original(path)
+    monkeypatch.setattr(os, "scandir", guarded)
+    assert [name for name, _ in node_requirements._source_files(pack)] == ["__init__.py"]
+
+
 def test_the_digest_changes_when_a_file_is_renamed(tmp_path: Path):
     # The bytes are identical either way, so a path-blind digest would call the
     # two packs the same. Moving code between files is a real change.

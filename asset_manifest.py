@@ -16,10 +16,11 @@ importable inside a running ComfyUI.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
 from urllib.parse import unquote, urlparse
 
@@ -36,6 +37,7 @@ MODEL_SUFFIXES = (
     ".bin",
     ".gguf",
     ".onnx",
+    ".unimate",
 )
 
 # Serialization families, reported so a runner (or an operator) can tell a
@@ -317,7 +319,43 @@ def build_manifest(
             # it would have matched still surfaces as unknown and blocks.
             logger.warning("Cloud Offload could not list %s model files: %s", category, exc)
 
-    classified = classify_assets(prompt, member_ids, filename_lists)
+    member_ids = list(member_ids)
+    discovery_prompt = copy.deepcopy(prompt)
+    declarations = []
+    hook_unknown = []
+    try:
+        import nodes
+        registry = nodes.NODE_CLASS_MAPPINGS
+    except ImportError:
+        registry = {}
+    for member_id in member_ids:
+        node = prompt.get(str(member_id)) or {}
+        hook = getattr(registry.get(node.get("class_type")), "cloud_offload_assets", None)
+        if not callable(hook):
+            continue
+        try:
+            for declaration in hook(dict(node.get("inputs") or {})):
+                category, filename = declaration["category"], declaration["filename"]
+                resolve_local_asset(category, filename)
+                input_name = declaration.get("input_name")
+                inputs = node.get("inputs") or {}
+                if input_name is not None and input_name not in inputs:
+                    raise ValueError("Declared asset names an absent input")
+                if input_name is None:
+                    matches = [name for name, value in inputs.items()
+                               if isinstance(value, str) and _normalize(value) == _normalize(filename)]
+                    input_name = matches[0] if len(matches) == 1 else None
+                if input_name is not None:
+                    # Filter before generic discovery deduplicates identities;
+                    # another input may independently select the same filename.
+                    discovery_prompt[str(member_id)]["inputs"].pop(input_name, None)
+                declarations.append({"category": category, "filename": filename,
+                                     "node_id": str(member_id), "input_name": input_name or "cloud_offload_assets"})
+        except Exception as exc:
+            hook_unknown.append({"node_id": str(member_id), "input_name": "cloud_offload_assets", "value": node.get("class_type"), "reason": str(exc)})
+    classified = classify_assets(discovery_prompt, member_ids, filename_lists)
+    classified["assets"].extend(declarations)
+    classified["unknown"].extend(hook_unknown)
     cache = load_digest_cache()
     snapshot = dict(cache)
     assets: list[dict[str, Any]] = []
@@ -327,7 +365,7 @@ def build_manifest(
     for entry in classified["assets"]:
         category = entry["category"]
         filename = entry["filename"]
-        full_path = folder_paths.get_full_path(category, filename)
+        full_path = resolve_local_asset(category, filename)
         if not full_path or not Path(full_path).is_file():
             unknown.append(
                 {
@@ -351,4 +389,22 @@ def build_manifest(
 
     if cache != snapshot:
         save_digest_cache(cache)
-    return {"assets": assets, "unknown": unknown}
+    unique = {(asset["category"], asset["filename"]): asset for asset in assets}
+    return {"assets": list(unique.values()), "unknown": unknown}
+
+
+def resolve_local_asset(category: str, filename: str) -> Path | None:
+    """Resolve declared files through ComfyUI roots, never arbitrary paths."""
+    import folder_paths
+    for value in (category, filename):
+        pure = PureWindowsPath(value)
+        if not isinstance(value, str) or not value or pure.drive or pure.is_absolute() or ".." in pure.parts:
+            raise ValueError("Unsafe declared asset path")
+    if category == "__input__":
+        root = Path(folder_paths.get_input_directory()).resolve()
+        path = (root / filename.replace("\\", "/")).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError("Unsafe declared input asset path")
+        return path if path.is_file() else None
+    path = folder_paths.get_full_path(category, filename)
+    return Path(path) if path else None

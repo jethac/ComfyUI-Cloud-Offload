@@ -160,6 +160,24 @@ cd web
 npm test
 ```
 
+## Custom file assets
+
+Node packs can declare selected files with a trusted class method
+`cloud_offload_assets(inputs)` returning `{category, filename}` records.
+Categories use ComfyUI model folders; `__input__` uses its input folder.
+Paths must be relative. An exact declaration replaces generic discovery at its
+uniquely matching input; `input_name` can identify a specific input explicitly.
+Local file digests are rechecked before free preflight resolves configured
+sources. Only unresolved local files are uploaded, followed by another
+preflight. The worker stages input assets
+in its input folder and model assets in their model category.
+
+Portable custom sockets must contain dictionaries, lists, tuples, numeric
+scalars, tensors, or bytes. UniMate uses versioned dictionaries with embedded
+GLB, numeric archive, or `.unimate` bundle bytes. Large model bundles cross
+boundaries in full. Runner file outputs under `3d` and `files` return to the
+local output folder at `cloud_offload/<job_id>/<validated remote subfolder>/`.
+
 ## License
 
 Apache-2.0
