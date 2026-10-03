@@ -92,3 +92,23 @@ def test_comfy_file3d_round_trip_is_explicit_and_safe(tmp_path: Path):
         "data": b"glTF-file",
         "format": "glb",
     }
+
+def test_execution_list_envelope_preserves_nested_values_and_empty_cases(tmp_path):
+    values = [{"rig_id": "a", "features": b"first"}, {"rig_id": "b", "features": b"second"}, [1, 2]]
+    path = tmp_path / "batch.part"
+    protocol.dump_bundle(protocol.pack_execution_values(values), path)
+    assert protocol.unpack_execution_values(protocol.load_bundle(path)) == values
+    assert protocol.unpack_execution_values(protocol.pack_execution_values([])) == []
+
+
+def test_legacy_list_is_one_value_not_an_execution_list():
+    assert protocol.unpack_execution_values([1, 2]) == [[1, 2]]
+    assert protocol.unpack_execution_values({"rig_id": "legacy"}) == [{"rig_id": "legacy"}]
+
+
+@pytest.mark.parametrize("value", [None, {}, "value"])
+def test_execution_envelope_requires_a_list(value):
+    with pytest.raises(ValueError):
+        protocol.pack_execution_values(value)
+    with pytest.raises(ValueError):
+        protocol.unpack_execution_values({"schema": "comfy.partition.execution.v1", "values": value})

@@ -185,3 +185,7 @@ local output folder at `cloud_offload/<job_id>/<validated remote subfolder>/`.
 ## License
 
 Apache-2.0
+
+Partition bridges preserve mapped execution lists without dropping earlier cases.
+Nested list-valued data remains one value. Upgrade this pack and the worker runtime
+together; older runtimes cannot read the execution-list envelopes.

@@ -20,12 +20,14 @@ try:
         ARTIFACT_MARKER,
         dump_bundle,
         load_bundle,
+        pack_execution_values,
+        unpack_execution_values,
         validate_boundary_type,
     )
 except ImportError:
     from client import CloudMeshArtifact, CloudOffloadError, _file_3d_glb, client, restore_partition_files
     from confirmation import ConfirmationError, confirmation_broker
-    from partition_protocol import ARTIFACT_MARKER, dump_bundle, load_bundle, validate_boundary_type
+    from partition_protocol import ARTIFACT_MARKER, dump_bundle, load_bundle, pack_execution_values, unpack_execution_values, validate_boundary_type
 
 
 PartitionResult = io.Custom("CLOUD_PARTITION_RESULT")
@@ -65,6 +67,12 @@ def _partition_path(value: str, *, must_exist: bool) -> Path:
     return path
 
 
+def _single_control(values: list[Any], name: str) -> Any:
+    if not isinstance(values, list) or len(values) != 1:
+        raise ValueError(f"Partition control {name} must contain exactly one value")
+    return values[0]
+
+
 class CloudPartitionGateway(io.ComfyNode):
     """Invisible local proxy that pauses execution while a cloud subgraph runs."""
 
@@ -82,6 +90,7 @@ class CloudPartitionGateway(io.ComfyNode):
             ],
             outputs=[PartitionResult.Output(display_name="partition result")],
             accept_all_inputs=True,
+            is_input_list=True,
             is_output_node=True,
             is_dev_only=True,
             not_idempotent=True,
@@ -95,13 +104,16 @@ class CloudPartitionGateway(io.ComfyNode):
         timeout_seconds: int = 3600,
         **boundary_values: Any,
     ) -> io.NodeOutput:
+        partition_json = _single_control(partition_json, "partition_json")
+        provider = _single_control(provider, "provider")
+        timeout_seconds = _single_control(timeout_seconds, "timeout_seconds")
         try:
             partition = json.loads(partition_json)
         except json.JSONDecodeError as exc:
             raise CloudOffloadError(f"Compiled partition JSON is invalid: {exc}") from exc
         if partition.get("schema") != "comfy.partition.job.v1":
             raise CloudOffloadError("Unsupported compiled partition schema")
-        inputs = {key: value for key, value in boundary_values.items() if key.startswith("input_")}
+        inputs = {key: pack_execution_values(value) for key, value in boundary_values.items() if key.startswith("input_")}
 
         try:
             from comfy.utils import ProgressBar
@@ -212,7 +224,7 @@ class CloudPartitionExtract(io.ComfyNode):
                 io.String.Input("boundary_key"),
                 io.String.Input("type_name"),
             ],
-            outputs=[io.AnyType.Output(display_name="value")],
+            outputs=[io.AnyType.Output(display_name="value", is_output_list=True)],
             is_dev_only=True,
         )
 
@@ -222,7 +234,8 @@ class CloudPartitionExtract(io.ComfyNode):
         values = result.get("values") or {}
         if boundary_key not in values:
             raise CloudOffloadError(f"Cloud partition returned no output for {boundary_key}")
-        return io.NodeOutput(_restore_file_artifact(values[boundary_key], type_name))
+        return io.NodeOutput([_restore_file_artifact(value, type_name)
+                              for value in unpack_execution_values(values[boundary_key])])
 
 
 class CloudPartitionInput(io.ComfyNode):
@@ -239,14 +252,14 @@ class CloudPartitionInput(io.ComfyNode):
                 io.String.Input("artifact_path"),
                 io.String.Input("type_name"),
             ],
-            outputs=[io.AnyType.Output(display_name="value")],
+            outputs=[io.AnyType.Output(display_name="value", is_output_list=True)],
             is_dev_only=True,
         )
 
     @classmethod
     def execute(cls, boundary_key: str, artifact_path: str, type_name: str) -> io.NodeOutput:
         validate_boundary_type(type_name)
-        return io.NodeOutput(load_bundle(_partition_path(artifact_path, must_exist=True)))
+        return io.NodeOutput(unpack_execution_values(load_bundle(_partition_path(artifact_path, must_exist=True))))
 
 
 class CloudPartitionOutput(io.ComfyNode):
@@ -265,6 +278,7 @@ class CloudPartitionOutput(io.ComfyNode):
                 io.String.Input("type_name"),
             ],
             outputs=[],
+            is_input_list=True,
             is_output_node=True,
             is_dev_only=True,
         )
@@ -273,9 +287,12 @@ class CloudPartitionOutput(io.ComfyNode):
     def execute(
         cls, value: Any, boundary_key: str, output_path: str, type_name: str
     ) -> io.NodeOutput:
+        boundary_key = _single_control(boundary_key, "boundary_key")
+        output_path = _single_control(output_path, "output_path")
+        type_name = _single_control(type_name, "type_name")
         validate_boundary_type(type_name)
         path = _partition_path(output_path, must_exist=False)
-        metadata = dump_bundle(value, path)
+        metadata = dump_bundle(pack_execution_values(value), path)
         return io.NodeOutput(
             ui={
                 "comfy_partition_artifacts": [

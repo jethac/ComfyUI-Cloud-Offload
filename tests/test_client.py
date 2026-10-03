@@ -995,3 +995,42 @@ def test_prepared_storage_client_maps_status_lifecycle_and_safe_deletion(monkeyp
             60,
         ),
     ]
+
+def test_partition_capture_preserves_execution_list_once(tmp_path, monkeypatch):
+    import partition_nodes as nodes
+    import partition_protocol as protocol
+    monkeypatch.setenv('COMFY_PARTITION_ROOT', str(tmp_path))
+    schema = nodes.CloudPartitionOutput.define_schema()
+    assert schema.is_input_list
+    values = [{'rig_id': 'rig-a', 'case': 0}, {'rig_id': 'rig-b', 'case': 1}, [1, 2]]
+    path = tmp_path / 'batch.part'
+    nodes.CloudPartitionOutput.execute(values, ['motion'], [str(path)], ['UNIMATE_MOTION'])
+    assert protocol.unpack_execution_values(protocol.load_bundle(path)) == values
+    assert nodes.CloudPartitionInput.define_schema().outputs[0].options['is_output_list']
+    assert nodes.CloudPartitionInput.execute('motion', str(path), 'UNIMATE_MOTION')[0] == values
+    assert nodes.CloudPartitionExtract.define_schema().outputs[0].options['is_output_list']
+    assert nodes.CloudPartitionExtract.execute({'values': {'motion': protocol.load_bundle(path)}}, 'motion', 'UNIMATE_MOTION')[0] == values
+
+
+def test_partition_capture_rejects_mapped_controls(tmp_path, monkeypatch):
+    import partition_nodes as nodes
+    monkeypatch.setenv('COMFY_PARTITION_ROOT', str(tmp_path))
+    with pytest.raises(ValueError, match='one'):
+        nodes.CloudPartitionOutput.execute([1, 2], ['a', 'b'], [str(tmp_path / 'value.part')], ['INT'])
+    assert not (tmp_path / 'value.part').exists()
+
+def test_partition_gateway_captures_all_dynamic_execution_values(monkeypatch):
+    import asyncio
+    import partition_nodes as nodes
+    import partition_protocol as protocol
+    captured = {}
+    def run(partition, inputs, **kwargs):
+        captured.update(inputs=inputs, partition=partition, provider=kwargs['provider'])
+        return {'values': {}}
+    monkeypatch.setattr(nodes.client, 'run_comfyui_partition', run)
+    cases = [{'rig_id': 'a'}, {'rig_id': 'b'}, [1, 2]]
+    asyncio.run(nodes.CloudPartitionGateway.execute(
+        ['{"schema":"comfy.partition.job.v1"}'], ['auto'], [60], input_0=cases))
+    assert captured['provider'] == 'auto'
+    assert protocol.unpack_execution_values(captured['inputs']['input_0']) == cases
+    assert nodes.CloudPartitionGateway.define_schema().is_input_list

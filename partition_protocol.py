@@ -11,6 +11,25 @@ from typing import Any
 
 
 SCHEMA = "comfy.partition.bundle.v1"
+EXECUTION_SCHEMA = "comfy.partition.execution.v1"
+
+
+def pack_execution_values(values: list[Any]) -> dict[str, Any]:
+    """Wrap an execution list without flattening list-valued entries."""
+    if not isinstance(values, list):
+        raise ValueError("Partition execution values must be a list")
+    return {"schema": EXECUTION_SCHEMA, "values": values}
+
+
+def unpack_execution_values(value: Any) -> list[Any]:
+    """Read an execution envelope, or restore one legacy scalar value."""
+    if isinstance(value, dict) and value.get("schema") == EXECUTION_SCHEMA:
+        if set(value) != {"schema", "values"} or not isinstance(value["values"], list):
+            raise ValueError("Invalid partition execution envelope")
+        return value["values"]
+    return [value]
+
+
 ARTIFACT_MARKER = "__comfy_partition_artifact__"
 MANIFEST_NAME = "manifest.json"
 TENSORS_NAME = "tensors.safetensors"
