@@ -24,6 +24,18 @@ def test_partition_files_restore_to_local_output(tmp_path, monkeypatch):
         client_module.restore_partition_files({"job_id": "job-1", "files": [{"filename": "../secret", "data": "e30="}]})
 
 
+def test_partition_preview_images_restore_as_image_ui_outputs(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    monkeypatch.setitem(sys.modules, 'folder_paths', SimpleNamespace(get_output_directory=lambda: str(tmp_path)))
+    result = {'job_id': 'preview-job', 'files': [{'filename': 'skeleton.png',
+        'subfolder': 'preview', 'data': 'UE5H', 'output_kind': 'images'}]}
+    ui = client_module.restore_partition_files(result)
+    assert ui['images'] == [{'filename': 'skeleton.png',
+        'subfolder': 'cloud_offload/preview-job/preview', 'type': 'output'}]
+    assert (tmp_path / ui['images'][0]['subfolder'] / 'skeleton.png').read_bytes() == b'PNG'
+
+
 def test_two_exports_keep_distinct_glb_and_provenance_pairs(tmp_path, monkeypatch):
     import sys
     import base64

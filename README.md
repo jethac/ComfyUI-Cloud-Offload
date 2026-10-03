@@ -15,6 +15,10 @@ is designed and on the roadmap.
 
 ## Requirements
 
+The gateway restores partition image files under ComfyUI's image UI key. Mesh and
+other file outputs retain their `3d` and `files` keys. The worker must include saved
+images in its final partition result.
+
 - A running Cloud Offload coordinator service. The pack never imports it as a
   library and never handles provider credentials — it only speaks HTTP to the
   coordinator's client-facing routes.

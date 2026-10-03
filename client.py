@@ -228,7 +228,7 @@ def restore_partition_files(result: dict) -> dict:
             raise CloudOffloadError("Partition output escapes output directory")
         directory.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-        key = item.get("output_kind") if item.get("output_kind") in ("3d", "files") else "files"
+        key = item.get("output_kind") if item.get("output_kind") in ("3d", "files", "images") else "files"
         ui.setdefault(key, []).append({"filename": filename, "subfolder": relative, "type": "output"})
     return ui
 
